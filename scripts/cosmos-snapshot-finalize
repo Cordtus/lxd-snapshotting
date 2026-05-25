@@ -269,7 +269,7 @@ def main():
     source_subdir = config_value(config, "SOURCE_SUBDIR", "data").strip("/")
     compression = config_value(config, "COMPRESSION", "zstd")
     zstd_level = int(config_value(config, "ZSTD_LEVEL", "8"))
-    keep_archives = int(config_value(config, "KEEP_ARCHIVES", "3"))
+    keep_archives = 1
     dry_run = args.dry_run or bool_value(config_value(config, "DRY_RUN", "0"))
     height = args.height or config_value(config, "HEIGHT", "")
     app_version = config_value(config, "APP_VERSION", "")

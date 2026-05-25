@@ -5,7 +5,11 @@ Tools for publishing Cosmos SDK / Tendermint / CometBFT database snapshots throu
 The intended deployment shape is:
 
 ```text
-source node consistent DB view
+source node live data path
+  -> stop local systemd service
+  -> validate Tendermint DB layout
+  -> rsync allowed DB directories into local staging path
+  -> restart local systemd service
   -> rsync over SSH over VPN
   -> snap-builder ingest volume
   -> builder finalizer packages and publishes
@@ -16,7 +20,7 @@ This is a public/client-node database snapshot publication setup. It is not a va
 
 ## Contents
 
-- `scripts/cosmos-snapshot-upload`: source-side helper that initializes the whole upload, rsync, and finalization flow.
+- `scripts/cosmos-snapshot-upload`: source-side helper that stops the configured service, stages only public database directories, rsyncs that staged copy, verifies the remote copy, and triggers finalization.
 - `scripts/cosmos-snapshot-remote`: builder-side restricted SSH command for prepare, rsync, status, and finalize operations.
 - `scripts/cosmos-snapshot-finalize`: builder-side finalizer that packages `/ingest/<chain>/data`, validates the archive, writes checksum/manifest sidecars, atomically updates `latest` symlinks, and rotates old archives.
 - `config/source-upload.env.example`: source-side upload config.
@@ -49,13 +53,20 @@ The source-side client initializes the whole process:
 
 ```text
 1. client runs cosmos-snapshot-upload
-2. client asks builder wrapper to prepare the chain ingest path
-3. client rsyncs the consistent DB view using the restricted rsync path
-4. client asks builder wrapper to finalize
-5. builder validates, packages, publishes, and rotates archives
+2. client stops the configured local systemd service
+3. client validates the configured local data path
+4. client rsyncs allowed database directories into a separate local staging path
+5. client restarts the local service
+6. client asks builder wrapper to prepare builder-managed ingest storage
+7. client rsyncs the staged copy using the restricted rsync path
+8. client verifies the remote copy with a checksum dry-run
+9. client asks builder wrapper to finalize
+10. builder validates, packages, publishes, and prunes old archives
 ```
 
 The builder does not need a scheduler for normal operation. It only responds to the restricted SSH command surface exposed to allowed upload clients.
+
+The client config does not accept builder-side file locations. The source command sends rsync to a placeholder target, and `cosmos-snapshot-remote` rewrites the destination to the builder-side `INGEST_ROOT` configured on the host.
 
 ## Access Control
 
@@ -78,27 +89,35 @@ The remote wrapper accepts only:
 - `finalize --chain <chain>`
 - `status --chain <chain>`
 
-The rsync path is checked so the remote rsync server can only write inside the allowed chain ingest directory.
+The rsync destination is selected by the remote wrapper, not by the client. Any client-supplied rsync destination is replaced with the builder-side chain ingest directory before real `rsync` runs.
 
 ## Source Consistency
 
 Do not rsync directly from a live, actively mutating Tendermint database directory.
 
-The source path must be one of:
-
-- a stopped node's database directory
-- a filesystem snapshot of the node database
-- another frozen/consistent view of the node database
-
-For large chains, the preferred source flow is:
+The uploader creates the consistent transfer source by stopping the configured service only long enough to update a separate local staging copy:
 
 ```text
-stop or pause briefly
-create filesystem snapshot
-restart node
-rsync from the filesystem snapshot
-remove filesystem snapshot after publication succeeds
+systemctl stop <service>
+validate <data path>
+rsync selected DB directories to <staging path>
+systemctl start <service>
+rsync <staging path> to builder
 ```
+
+The staging copy is updated in-place, so repeated runs transfer only changed data and `--delete` removes files that disappeared because of pruning.
+
+By default the source-side staging copy includes only:
+
+- `application.db`
+- `blockstore.db`
+- `state.db`
+- `evidence.db`
+- `tx_index.db`
+
+It intentionally does not copy `priv_validator_state.json`, `snapshots`, `cs.wal`, validator keys, node keys, keyrings, or arbitrary top-level data directories.
+
+`STAGE_DB_DIRS` is still restricted to known public database directories. Attempts to stage `snapshots`, WALs, validator state files, or arbitrary top-level paths are rejected.
 
 ## Public Layout
 
@@ -114,7 +133,7 @@ The finalizer publishes one chain directory:
   latest.json -> <chain>-YYYYMMDDTHHMMSSZ.tar.zst.json
 ```
 
-If finalization fails, the previous `latest` symlinks remain unchanged.
+If finalization fails, the previous `latest` symlinks remain unchanged. Retention is fixed to one completed managed archive per chain; older managed archives are pruned only after the new archive has been validated and published.
 
 ## Upload Validation
 
@@ -176,6 +195,7 @@ sudo cosmos-snapshot-finalize --config /etc/cosmos-snapshot-finalizer.env --chai
 - Password login, TCP forwarding, X11 forwarding, and root login should be disabled for the upload user.
 - The upload user's SSH keys should be forced through `cosmos-snapshot-remote`.
 - Client IDs should be mapped to allowed chains in the builder-side access-control file.
+- Builder-side storage paths should be configured only in `config/remote.env.example` and `config/finalizer.env.example`, never in client upload config.
 - The finalizer refuses to package while transfer marker files exist.
 - The finalizer rejects uploads that do not look like a Tendermint/CometBFT database.
 - The finalizer excludes `priv_validator_state.json`, validator keys, node keys, and keyrings by default.

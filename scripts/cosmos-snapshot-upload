@@ -2,9 +2,19 @@
 import argparse
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+
+ALLOWED_STAGE_DB_DIRS = {
+    "application.db",
+    "blockstore.db",
+    "state.db",
+    "evidence.db",
+    "tx_index.db",
+}
 
 
 def parse_env_file(path):
@@ -35,10 +45,30 @@ def bool_value(value):
     return str(value).lower() in {"1", "true", "yes", "on"}
 
 
+def safe_chain_name(chain):
+    if not chain or "/" in chain or chain in {".", ".."}:
+        raise SystemExit("invalid chain name")
+    return chain
+
+
+def split_words(value):
+    return shlex.split(value) if value else []
+
+
 def run(command, dry_run):
     print(shlex.join(command))
     if not dry_run:
         subprocess.run(command, check=True)
+
+
+def run_capture(command, dry_run):
+    print(shlex.join(command))
+    if dry_run:
+        return ""
+    result = subprocess.run(command, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.stderr:
+        print(result.stderr, file=sys.stderr, end="")
+    return result.stdout
 
 
 def ssh_command(builder, port, ssh_options, remote_command):
@@ -51,6 +81,10 @@ def ssh_command(builder, port, ssh_options, remote_command):
     return command
 
 
+def systemctl_command(systemctl, operation, service):
+    return [*shlex.split(systemctl), operation, service]
+
+
 def remote_command(base_command, operation, chain, client_id=""):
     command = [*shlex.split(base_command), operation, "--chain", chain]
     if client_id:
@@ -58,7 +92,22 @@ def remote_command(base_command, operation, chain, client_id=""):
     return command
 
 
-def rsync_command(source_path, builder, remote_data_path, port, ssh_options, delete, extra_args, remote_base_command, chain, client_id=""):
+def local_rsync_command(source_path, staging_path, db_dir, extra_args):
+    return [
+        "rsync",
+        "-a",
+        "--delete",
+        *split_words(extra_args),
+        f"{(source_path / db_dir).as_posix().rstrip('/')}/",
+        f"{(staging_path / db_dir).as_posix().rstrip('/')}/",
+    ]
+
+
+def remote_rsync_target(chain):
+    return f"snapshot-upload-{chain}"
+
+
+def remote_rsync_command(source_path, builder, port, ssh_options, delete, extra_args, remote_base_command, chain, client_id="", checksum=False):
     ssh_parts = ["ssh"]
     if port:
         ssh_parts += ["-p", str(port)]
@@ -73,16 +122,119 @@ def rsync_command(source_path, builder, remote_data_path, port, ssh_options, del
         "--info=progress2",
         f"--rsync-path={rsync_path}",
     ]
+    if checksum:
+        command.append("--checksum")
     if delete:
         command.append("--delete")
     if extra_args:
         command += shlex.split(extra_args)
-    command += ["-e", shlex.join(ssh_parts), f"{source_path.rstrip('/')}/", f"{builder}:{remote_data_path.rstrip('/')}/"]
+    command += ["-e", shlex.join(ssh_parts), f"{source_path.rstrip('/')}/", f"{builder}:{remote_rsync_target(chain)}/"]
     return command
 
 
+def remote_verify_command(source_path, builder, port, ssh_options, delete, extra_args, remote_base_command, chain, client_id=""):
+    command = remote_rsync_command(
+        source_path,
+        builder,
+        port,
+        ssh_options,
+        delete,
+        extra_args,
+        remote_base_command,
+        chain,
+        client_id,
+        checksum=True,
+    )
+    return [*command[:4], "--dry-run", "--itemize-changes", *command[4:]]
+
+
+def validate_db_dir(db_dir, marker_patterns):
+    if not db_dir.is_dir():
+        raise SystemExit(f"missing required Tendermint DB directory: {db_dir}")
+    for pattern in marker_patterns:
+        if any(db_dir.glob(pattern)):
+            return
+    markers = ", ".join(marker_patterns)
+    raise SystemExit(f"required DB directory has no recognizable DB marker ({markers}): {db_dir}")
+
+
+def validate_tendermint_data(data_path, required_db_dirs, marker_patterns):
+    if not required_db_dirs:
+        raise SystemExit("REQUIRED_DB_DIRS must list at least one Tendermint DB directory")
+    if not marker_patterns:
+        raise SystemExit("DB_MARKER_PATTERNS must list at least one recognizable DB marker")
+    for db_dir in required_db_dirs:
+        if "/" in db_dir or db_dir in {".", ".."}:
+            raise SystemExit("required DB directory must be a top-level data directory")
+        validate_db_dir(data_path / db_dir, marker_patterns)
+
+
+def validate_stage_db_dirs(stage_db_dirs):
+    if not stage_db_dirs:
+        raise SystemExit("STAGE_DB_DIRS must list at least one database directory to copy")
+    for db_dir in stage_db_dirs:
+        if "/" in db_dir or db_dir in {".", ".."}:
+            raise SystemExit("staged DB directory must be a top-level data directory")
+        if db_dir not in ALLOWED_STAGE_DB_DIRS:
+            allowed = ", ".join(sorted(ALLOWED_STAGE_DB_DIRS))
+            raise SystemExit(f"staged DB directory is not allowed: {db_dir}; allowed: {allowed}")
+
+
+def ensure_separate_staging(data_path, staging_path):
+    data_resolved = data_path.resolve()
+    staging_resolved = staging_path.resolve()
+    if data_resolved == staging_resolved:
+        raise SystemExit("STAGING_PATH must be separate from DATA_PATH")
+    if data_resolved in staging_resolved.parents:
+        raise SystemExit("STAGING_PATH must not be inside DATA_PATH")
+    if staging_resolved in data_resolved.parents:
+        raise SystemExit("DATA_PATH must not be inside STAGING_PATH")
+
+
+def remove_path(path, dry_run):
+    if dry_run:
+        print(f"would remove {path}")
+        return
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def prune_staging_root(staging_path, allowed_names, dry_run):
+    if not staging_path.exists():
+        return
+    allowed = set(allowed_names)
+    for child in sorted(staging_path.iterdir()):
+        if child.name not in allowed:
+            remove_path(child, dry_run)
+
+
+def stage_database(data_path, staging_path, stage_db_dirs, required_db_dirs, marker_patterns, local_rsync_extra_args, dry_run):
+    if dry_run:
+        print(f"would validate Tendermint database at {data_path}")
+    else:
+        validate_tendermint_data(data_path, required_db_dirs, marker_patterns)
+    validate_stage_db_dirs(stage_db_dirs)
+
+    if dry_run:
+        print(f"would create staging directory {staging_path}")
+    else:
+        staging_path.mkdir(parents=True, exist_ok=True)
+
+    prune_staging_root(staging_path, stage_db_dirs, dry_run)
+
+    for db_dir in stage_db_dirs:
+        source_db = data_path / db_dir
+        staged_db = staging_path / db_dir
+        if dry_run or source_db.exists():
+            run(local_rsync_command(data_path, staging_path, db_dir, local_rsync_extra_args), dry_run)
+        elif staged_db.exists():
+            remove_path(staged_db, dry_run)
+
+
 def parse_args():
-    parser = argparse.ArgumentParser(description="Rsync a consistent Cosmos/Tendermint DB view to a snapshot builder and trigger finalization.")
+    parser = argparse.ArgumentParser(description="Stop a Cosmos/Tendermint service, stage public DB files, rsync to a snapshot builder, and trigger finalization.")
     parser.add_argument("--config", default=os.environ.get("COSMOS_SNAPSHOT_UPLOAD_CONFIG", "./source-upload.env"))
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--no-finalize", action="store_true")
@@ -93,44 +245,62 @@ def main():
     args = parse_args()
     config = parse_env_file(args.config)
 
-    chain = config_value(config, "CHAIN")
-    source_path = config_value(config, "SOURCE_PATH")
+    chain = safe_chain_name(config_value(config, "CHAIN"))
+    data_path = config_value(config, "DATA_PATH")
+    staging_path = config_value(config, "STAGING_PATH")
+    service_name = config_value(config, "SERVICE_NAME")
+    systemctl = config_value(config, "SYSTEMCTL_COMMAND", "systemctl")
     builder = config_value(config, "BUILDER_SSH")
     builder_port = config_value(config, "BUILDER_SSH_PORT", "22")
     ssh_options = config_value(config, "SSH_OPTIONS", "")
-    remote_ingest_root = config_value(config, "REMOTE_INGEST_ROOT", "/ingest").rstrip("/")
     remote_base_command = config_value(config, "REMOTE_COMMAND", "cosmos-snapshot-remote")
     client_id = config_value(config, "CLIENT_ID", "")
+    required_db_dirs = split_words(config_value(config, "REQUIRED_DB_DIRS", "application.db blockstore.db state.db"))
+    marker_patterns = split_words(config_value(config, "DB_MARKER_PATTERNS", "CURRENT MANIFEST-* *.sst *.ldb"))
+    stage_db_dirs = split_words(config_value(config, "STAGE_DB_DIRS", "application.db blockstore.db state.db evidence.db tx_index.db"))
+    local_rsync_extra_args = config_value(config, "LOCAL_RSYNC_EXTRA_ARGS", "--numeric-ids")
     rsync_delete = bool_value(config_value(config, "RSYNC_DELETE", "1"))
     rsync_extra_args = config_value(config, "RSYNC_EXTRA_ARGS", "--numeric-ids")
+    rsync_checksum = bool_value(config_value(config, "RSYNC_CHECKSUM", "0"))
+    verify_remote_rsync = bool_value(config_value(config, "VERIFY_REMOTE_RSYNC", "1"))
     run_finalizer = bool_value(config_value(config, "RUN_FINALIZER", "1")) and not args.no_finalize
     dry_run = args.dry_run or bool_value(config_value(config, "DRY_RUN", "0"))
 
     missing = [name for name, value in {
         "CHAIN": chain,
-        "SOURCE_PATH": source_path,
+        "DATA_PATH": data_path,
+        "STAGING_PATH": staging_path,
+        "SERVICE_NAME": service_name,
         "BUILDER_SSH": builder,
     }.items() if not value]
     if missing:
         raise SystemExit(f"missing required config: {', '.join(missing)}")
 
-    if not dry_run and not Path(source_path).is_dir():
-        raise SystemExit(f"source path does not exist or is not a directory: {source_path}")
-
-    remote_chain_path = f"{remote_ingest_root}/{chain}"
-    remote_data_path = f"{remote_chain_path}/data"
-    marker_path = f"{remote_chain_path}/.transfer-in-progress"
+    data_path = Path(data_path)
+    staging_path = Path(staging_path)
+    if not dry_run:
+        if not data_path.is_dir():
+            raise SystemExit(f"DATA_PATH does not exist or is not a directory: {data_path}")
+        ensure_separate_staging(data_path, staging_path)
 
     prepare_command = shlex.join(remote_command(remote_base_command, "prepare", chain, client_id))
     finalize_command = shlex.join(remote_command(remote_base_command, "finalize", chain, client_id))
 
+    service_stopped = False
+    run(systemctl_command(systemctl, "stop", service_name), dry_run)
+    service_stopped = True
+    try:
+        stage_database(data_path, staging_path, stage_db_dirs, required_db_dirs, marker_patterns, local_rsync_extra_args, dry_run)
+    finally:
+        if service_stopped:
+            run(systemctl_command(systemctl, "start", service_name), dry_run)
+
     run(ssh_command(builder, builder_port, ssh_options, prepare_command), dry_run)
     try:
         run(
-            rsync_command(
-                source_path,
+            remote_rsync_command(
+                staging_path.as_posix(),
                 builder,
-                remote_data_path,
                 builder_port,
                 ssh_options,
                 rsync_delete,
@@ -138,11 +308,30 @@ def main():
                 remote_base_command,
                 chain,
                 client_id,
+                checksum=rsync_checksum,
             ),
             dry_run,
         )
+        if verify_remote_rsync:
+            verify_output = run_capture(
+                remote_verify_command(
+                    staging_path.as_posix(),
+                    builder,
+                    builder_port,
+                    ssh_options,
+                    rsync_delete,
+                    rsync_extra_args,
+                    remote_base_command,
+                    chain,
+                    client_id,
+                ),
+                dry_run,
+            )
+            changes = [line for line in verify_output.splitlines() if line.strip()]
+            if changes:
+                raise SystemExit("remote rsync verification found pending changes:\n" + "\n".join(changes))
     except Exception:
-        print(f"transfer failed; marker left in place for finalizer safety: {marker_path}", file=sys.stderr)
+        print("transfer failed; remote transfer marker left in place for finalizer safety", file=sys.stderr)
         raise
 
     if run_finalizer:

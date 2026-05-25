@@ -16,9 +16,10 @@ Do not add unrelated LXD platform planning docs, private host inventory, monitor
 
 ## Architecture Rules
 
-- Source nodes must rsync only from a consistent DB view: stopped node, filesystem snapshot, or otherwise frozen source.
+- Source upload must stop the configured local systemd service, validate the configured local data path, stage only allowed database directories into a separate local path, restart the service, then rsync the staging path.
 - The builder packages only what it receives; it cannot repair inconsistent source data.
 - The client initiates the full happy path: prepare remote ingest, rsync, and finalize.
+- Client-side config must not accept builder-side file locations; the remote wrapper owns and enforces builder-side ingest paths.
 - The builder-side SSH wrapper must enforce client-to-chain access control before prepare, rsync, finalize, or status operations.
 - The builder writes public artifacts through staged files and atomic renames.
 - The finalizer must validate that uploaded content looks like a Tendermint/CometBFT node database before publishing.
@@ -34,6 +35,7 @@ Do not add unrelated LXD platform planning docs, private host inventory, monitor
 - Do not assume a specific VPN address, SSH port, LXD bridge, pool, chain, or container name.
 - Prefer explicit config over hardcoded local values.
 - Exclude validator state, keys, and keyrings by default.
+- Do not stage `snapshots`, `cs.wal`, or other non-database top-level data directories by default.
 - Do not trust client-supplied client IDs in production. Use forced-command SSH key configuration to set `COSMOS_SNAPSHOT_CLIENT_ID`.
 
 ## File Map

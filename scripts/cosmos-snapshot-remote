@@ -87,14 +87,12 @@ def chain_paths(ingest_root, chain):
     return chain_root, data_root
 
 
-def ensure_rsync_destination(args, data_root):
+def rsync_args_with_host_destination(args, data_root):
     if "--server" not in args:
         raise SystemExit("rsync wrapper only allows rsync server mode")
     if not args:
         raise SystemExit("missing rsync server arguments")
-    destination = Path(args[-1]).resolve()
-    if destination != data_root and data_root not in destination.parents:
-        raise SystemExit(f"rsync destination is outside allowed ingest path: {args[-1]}")
+    return [*args[:-1], str(data_root)]
 
 
 def parse_command_line(argv):
@@ -161,8 +159,8 @@ def main(argv=None):
         return 0
 
     if args.operation == "rsync":
-        ensure_rsync_destination(remainder, data_root)
-        command = [*rsync_command, *remainder]
+        data_root.mkdir(parents=True, exist_ok=True)
+        command = [*rsync_command, *rsync_args_with_host_destination(remainder, data_root)]
         subprocess.run(command, check=True, env=safe_subprocess_env())
         return 0
 
@@ -179,7 +177,6 @@ def main(argv=None):
             "chain": chain,
             "client": client_id,
             "prepared": marker.exists(),
-            "data_path": str(data_root),
         }, sort_keys=True))
         return 0
 
