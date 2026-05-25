@@ -1,0 +1,11 @@
+[Unit]
+Description=Run LXD snapshot and retention job daily
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=30m
+Persistent=true
+Unit=lxd-snapshot.service
+
+[Install]
+WantedBy=timers.target

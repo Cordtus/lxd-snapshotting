@@ -1,0 +1,28 @@
+.private/
+.playwright-mcp/
+.agents/
+.codex/
+docs/
+monitoring/
+
+# This workspace can expose a non-repository .git mount; keep it out of the public tree.
+.git/
+
+# Local LXD/LXC auth material and environment files
+.lxc/
+.config/lxc/
+client*.crt
+client*.key
+server*.crt
+servercerts/
+*.pem
+*.p12
+*.pfx
+.env
+.env.*
+!.env.example
+
+# Local editor and OS noise
+.DS_Store
+*.swp
+*.swo

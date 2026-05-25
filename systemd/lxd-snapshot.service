@@ -1,0 +1,10 @@
+[Unit]
+Description=LXD snapshot and retention job
+Documentation=https://github.com/cordtus/lxd-snapshotting
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/lxd-snapshot.conf
+ExecStart=/usr/local/sbin/lxd-snapshot --config /etc/lxd-snapshot.conf

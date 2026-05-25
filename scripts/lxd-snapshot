@@ -1,0 +1,256 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+CONFIG_PATH="${LXD_SNAPSHOT_CONFIG:-/etc/lxd-snapshot.conf}"
+MODE="all"
+DRY_RUN_OVERRIDE=""
+
+usage() {
+  cat <<'USAGE'
+Usage: lxd-snapshot [--config PATH] [--dry-run] [--snapshot-only] [--prune-only]
+
+Creates LXD instance/custom-volume snapshots and prunes old snapshots created by
+this setup. Configuration is read from /etc/lxd-snapshot.conf by default.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --config)
+      CONFIG_PATH="${2:?missing config path}"
+      shift 2
+      ;;
+    --dry-run)
+      DRY_RUN_OVERRIDE=1
+      shift
+      ;;
+    --snapshot-only)
+      MODE="snapshot"
+      shift
+      ;;
+    --prune-only)
+      MODE="prune"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ -f "$CONFIG_PATH" ]]; then
+  # shellcheck source=/dev/null
+  source "$CONFIG_PATH"
+fi
+
+command -v lxc >/dev/null 2>&1 || { echo "missing dependency: lxc" >&2; exit 127; }
+command -v jq >/dev/null 2>&1 || { echo "missing dependency: jq" >&2; exit 127; }
+command -v date >/dev/null 2>&1 || { echo "missing dependency: date" >&2; exit 127; }
+
+LXD_REMOTE="${LXD_REMOTE:-}"
+LXD_REMOTE="${LXD_REMOTE%:}"
+LXD_PROJECT="${LXD_PROJECT:-default}"
+SNAPSHOT_INSTANCES="${SNAPSHOT_INSTANCES:-1}"
+INSTANCE_NAMES="${INSTANCE_NAMES:-all}"
+SNAPSHOT_DISK_VOLUMES="${SNAPSHOT_DISK_VOLUMES:-root}"
+SNAPSHOT_CUSTOM_VOLUMES="${SNAPSHOT_CUSTOM_VOLUMES:-0}"
+CUSTOM_VOLUME_POOLS="${CUSTOM_VOLUME_POOLS:-}"
+CUSTOM_VOLUME_NAMES="${CUSTOM_VOLUME_NAMES:-all}"
+SNAPSHOT_PREFIX="${SNAPSHOT_PREFIX:-auto}"
+RETENTION_DAYS="${RETENTION_DAYS:-7}"
+CREATE_SNAPSHOTS="${CREATE_SNAPSHOTS:-1}"
+PRUNE_OLD="${PRUNE_OLD:-1}"
+DRY_RUN="${DRY_RUN_OVERRIDE:-${DRY_RUN:-0}}"
+
+case "$SNAPSHOT_DISK_VOLUMES" in
+  root|all-exclusive) ;;
+  *)
+    echo "SNAPSHOT_DISK_VOLUMES must be 'root' or 'all-exclusive'" >&2
+    exit 2
+    ;;
+esac
+
+if ! [[ "$RETENTION_DAYS" =~ ^[0-9]+$ ]]; then
+  echo "RETENTION_DAYS must be a non-negative integer" >&2
+  exit 2
+fi
+
+remote_prefix() {
+  if [[ -n "$LXD_REMOTE" ]]; then
+    printf '%s:' "$LXD_REMOTE"
+  fi
+}
+
+run() {
+  printf '+'
+  printf ' %q' "$@"
+  printf '\n'
+  if [[ "$DRY_RUN" != "1" ]]; then
+    "$@"
+  fi
+}
+
+query() {
+  lxc query "$@"
+}
+
+snapshot_name() {
+  printf '%s-%s' "$SNAPSHOT_PREFIX" "$(date -u +%Y%m%dT%H%M%SZ)"
+}
+
+cutoff_epoch() {
+  date -u -d "-${RETENTION_DAYS} days" +%s
+}
+
+list_instances() {
+  if [[ "$INSTANCE_NAMES" == "all" ]]; then
+    lxc list "$(remote_prefix)" --project "$LXD_PROJECT" --format json \
+      | jq -r '.[].name'
+  else
+    # Intentional word splitting for the configured whitespace-separated list.
+    # shellcheck disable=SC2086
+    printf '%s\n' $INSTANCE_NAMES
+  fi
+}
+
+list_custom_volumes() {
+  local pool="$1"
+
+  if [[ "$CUSTOM_VOLUME_NAMES" == "all" ]]; then
+    lxc storage volume list "$(remote_prefix)$pool" custom --project "$LXD_PROJECT" --format json \
+      | jq -r '.[] | select(.type == "custom") | .name'
+  else
+    # Intentional word splitting for the configured whitespace-separated list.
+    # shellcheck disable=SC2086
+    printf '%s\n' $CUSTOM_VOLUME_NAMES
+  fi
+}
+
+create_instance_snapshots() {
+  local snap="$1"
+  local instance
+
+  [[ "$SNAPSHOT_INSTANCES" == "1" ]] || return 0
+
+  while IFS= read -r instance; do
+    [[ -n "$instance" ]] || continue
+    run lxc snapshot "$(remote_prefix)$instance" "$snap" \
+      --project "$LXD_PROJECT" \
+      --disk-volumes "$SNAPSHOT_DISK_VOLUMES"
+  done < <(list_instances)
+}
+
+create_custom_volume_snapshots() {
+  local snap="$1"
+  local pool volume
+
+  [[ "$SNAPSHOT_CUSTOM_VOLUMES" == "1" ]] || return 0
+  [[ -n "$CUSTOM_VOLUME_POOLS" ]] || {
+    echo "SNAPSHOT_CUSTOM_VOLUMES=1 requires CUSTOM_VOLUME_POOLS" >&2
+    exit 2
+  }
+
+  # Intentional word splitting for the configured whitespace-separated list.
+  # shellcheck disable=SC2086
+  for pool in $CUSTOM_VOLUME_POOLS; do
+    while IFS= read -r volume; do
+      [[ -n "$volume" ]] || continue
+      run lxc storage volume snapshot "$(remote_prefix)$pool" "$volume" "$snap" \
+        --project "$LXD_PROJECT"
+    done < <(list_custom_volumes "$pool")
+  done
+}
+
+snapshot_rows_for_instance() {
+  local instance="$1"
+  query "$(remote_prefix)/1.0/instances/${instance}/snapshots?project=${LXD_PROJECT}&recursion=1" \
+    | jq -r --arg prefix "${SNAPSHOT_PREFIX}-" '
+      .[]?
+      | select(.name | split("/")[-1] | startswith($prefix))
+      | [(.name | split("/")[-1]), .created_at]
+      | @tsv
+    '
+}
+
+snapshot_rows_for_volume() {
+  local pool="$1"
+  local volume="$2"
+  query "$(remote_prefix)/1.0/storage-pools/${pool}/volumes/custom/${volume}/snapshots?project=${LXD_PROJECT}&recursion=1" \
+    | jq -r --arg prefix "${SNAPSHOT_PREFIX}-" '
+      .[]?
+      | select(.name | split("/")[-1] | startswith($prefix))
+      | [(.name | split("/")[-1]), .created_at]
+      | @tsv
+    '
+}
+
+is_older_than_cutoff() {
+  local created_at="$1"
+  local cutoff="$2"
+  local created_epoch
+
+  created_epoch="$(date -u -d "$created_at" +%s)"
+  [[ "$created_epoch" -lt "$cutoff" ]]
+}
+
+prune_instance_snapshots() {
+  local cutoff instance snap created_at
+  cutoff="$(cutoff_epoch)"
+
+  [[ "$SNAPSHOT_INSTANCES" == "1" ]] || return 0
+
+  while IFS= read -r instance; do
+    [[ -n "$instance" ]] || continue
+    while IFS=$'\t' read -r snap created_at; do
+      [[ -n "$snap" && -n "$created_at" ]] || continue
+      if is_older_than_cutoff "$created_at" "$cutoff"; then
+        run lxc delete "$(remote_prefix)$instance/$snap" --project "$LXD_PROJECT"
+      fi
+    done < <(snapshot_rows_for_instance "$instance")
+  done < <(list_instances)
+}
+
+prune_custom_volume_snapshots() {
+  local cutoff pool volume snap created_at
+  cutoff="$(cutoff_epoch)"
+
+  [[ "$SNAPSHOT_CUSTOM_VOLUMES" == "1" ]] || return 0
+
+  # Intentional word splitting for the configured whitespace-separated list.
+  # shellcheck disable=SC2086
+  for pool in $CUSTOM_VOLUME_POOLS; do
+    while IFS= read -r volume; do
+      [[ -n "$volume" ]] || continue
+      while IFS=$'\t' read -r snap created_at; do
+        [[ -n "$snap" && -n "$created_at" ]] || continue
+        if is_older_than_cutoff "$created_at" "$cutoff"; then
+          run lxc storage volume delete "$(remote_prefix)$pool" "$volume/$snap" \
+            --project "$LXD_PROJECT"
+        fi
+      done < <(snapshot_rows_for_volume "$pool" "$volume")
+    done < <(list_custom_volumes "$pool")
+  done
+}
+
+main() {
+  local snap
+  snap="$(snapshot_name)"
+
+  if [[ "$MODE" != "prune" && "$CREATE_SNAPSHOTS" == "1" ]]; then
+    create_instance_snapshots "$snap"
+    create_custom_volume_snapshots "$snap"
+  fi
+
+  if [[ "$MODE" != "snapshot" && "$PRUNE_OLD" == "1" ]]; then
+    prune_instance_snapshots
+    prune_custom_volume_snapshots
+  fi
+}
+
+main "$@"
