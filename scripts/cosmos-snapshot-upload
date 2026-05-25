@@ -51,18 +51,27 @@ def ssh_command(builder, port, ssh_options, remote_command):
     return command
 
 
-def rsync_command(source_path, builder, remote_data_path, port, ssh_options, delete, extra_args):
+def remote_command(base_command, operation, chain, client_id=""):
+    command = [*shlex.split(base_command), operation, "--chain", chain]
+    if client_id:
+        command += ["--client-id", client_id]
+    return command
+
+
+def rsync_command(source_path, builder, remote_data_path, port, ssh_options, delete, extra_args, remote_base_command, chain, client_id=""):
     ssh_parts = ["ssh"]
     if port:
         ssh_parts += ["-p", str(port)]
     if ssh_options:
         ssh_parts += shlex.split(ssh_options)
+    rsync_path = shlex.join(remote_command(remote_base_command, "rsync", chain, client_id))
 
     command = [
         "rsync",
         "-a",
         "--partial",
         "--info=progress2",
+        f"--rsync-path={rsync_path}",
     ]
     if delete:
         command.append("--delete")
@@ -90,7 +99,8 @@ def main():
     builder_port = config_value(config, "BUILDER_SSH_PORT", "22")
     ssh_options = config_value(config, "SSH_OPTIONS", "")
     remote_ingest_root = config_value(config, "REMOTE_INGEST_ROOT", "/ingest").rstrip("/")
-    finalizer_command = config_value(config, "FINALIZER_COMMAND", "sudo /usr/local/sbin/cosmos-snapshot-finalize")
+    remote_base_command = config_value(config, "REMOTE_COMMAND", "cosmos-snapshot-remote")
+    client_id = config_value(config, "CLIENT_ID", "")
     rsync_delete = bool_value(config_value(config, "RSYNC_DELETE", "1"))
     rsync_extra_args = config_value(config, "RSYNC_EXTRA_ARGS", "--numeric-ids")
     run_finalizer = bool_value(config_value(config, "RUN_FINALIZER", "1")) and not args.no_finalize
@@ -111,17 +121,32 @@ def main():
     remote_data_path = f"{remote_chain_path}/data"
     marker_path = f"{remote_chain_path}/.transfer-in-progress"
 
-    run(ssh_command(builder, builder_port, ssh_options, f"mkdir -p {shlex.quote(remote_data_path)} && touch {shlex.quote(marker_path)}"), dry_run)
+    prepare_command = shlex.join(remote_command(remote_base_command, "prepare", chain, client_id))
+    finalize_command = shlex.join(remote_command(remote_base_command, "finalize", chain, client_id))
+
+    run(ssh_command(builder, builder_port, ssh_options, prepare_command), dry_run)
     try:
-        run(rsync_command(source_path, builder, remote_data_path, builder_port, ssh_options, rsync_delete, rsync_extra_args), dry_run)
+        run(
+            rsync_command(
+                source_path,
+                builder,
+                remote_data_path,
+                builder_port,
+                ssh_options,
+                rsync_delete,
+                rsync_extra_args,
+                remote_base_command,
+                chain,
+                client_id,
+            ),
+            dry_run,
+        )
     except Exception:
         print(f"transfer failed; marker left in place for finalizer safety: {marker_path}", file=sys.stderr)
         raise
 
-    run(ssh_command(builder, builder_port, ssh_options, f"rm -f {shlex.quote(marker_path)}"), dry_run)
-
     if run_finalizer:
-        run(ssh_command(builder, builder_port, ssh_options, f"{finalizer_command} --chain {shlex.quote(chain)}"), dry_run)
+        run(ssh_command(builder, builder_port, ssh_options, finalize_command), dry_run)
 
     return 0
 

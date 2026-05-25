@@ -1,0 +1,7 @@
+{
+  "clients": {
+    "example-source": {
+      "chains": ["examplechain"]
+    }
+  }
+}

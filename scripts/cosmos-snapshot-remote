@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import os
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+
+
+def parse_env_file(path):
+    values = {}
+    if not path:
+        return values
+    config = Path(path)
+    if not config.exists():
+        raise SystemExit(f"remote config not found: {path}")
+    for raw_line in config.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, raw_value = line.split("=", 1)
+        try:
+            parsed = shlex.split(raw_value.strip(), comments=False, posix=True)
+        except ValueError as exc:
+            raise SystemExit(f"invalid config line for {key.strip()}: {exc}") from exc
+        values[key.strip()] = parsed[0] if parsed else ""
+    return values
+
+
+def config_value(config, name, default=""):
+    return config.get(name, default)
+
+
+def safe_subprocess_env():
+    return {
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    }
+
+
+def bool_value(value):
+    return str(value).lower() in {"1", "true", "yes", "on"}
+
+
+def read_access_config(path):
+    try:
+        return json.loads(Path(path).read_text())
+    except FileNotFoundError as exc:
+        raise SystemExit(f"access config not found: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"invalid access config: {exc}") from exc
+
+
+def client_id_from_env():
+    return os.environ.get("COSMOS_SNAPSHOT_CLIENT_ID", "")
+
+
+def allowed_chains(access, client_id):
+    clients = access.get("clients", {})
+    client = clients.get(client_id)
+    if not isinstance(client, dict):
+        return []
+    chains = client.get("chains", [])
+    return chains if isinstance(chains, list) else []
+
+
+def require_allowed(access, client_id, chain):
+    if not client_id:
+        raise SystemExit("missing COSMOS_SNAPSHOT_CLIENT_ID")
+    chains = allowed_chains(access, client_id)
+    if "*" not in chains and chain not in chains:
+        raise SystemExit(f"client {client_id!r} is not allowed to publish chain {chain!r}")
+
+
+def safe_chain_name(chain):
+    if not chain or "/" in chain or chain in {".", ".."}:
+        raise SystemExit("invalid chain name")
+    return chain
+
+
+def chain_paths(ingest_root, chain):
+    root = Path(ingest_root).resolve()
+    chain_root = (root / chain).resolve()
+    data_root = (chain_root / "data").resolve()
+    if root not in chain_root.parents:
+        raise SystemExit("resolved chain path escapes ingest root")
+    return chain_root, data_root
+
+
+def ensure_rsync_destination(args, data_root):
+    if "--server" not in args:
+        raise SystemExit("rsync wrapper only allows rsync server mode")
+    if not args:
+        raise SystemExit("missing rsync server arguments")
+    destination = Path(args[-1]).resolve()
+    if destination != data_root and data_root not in destination.parents:
+        raise SystemExit(f"rsync destination is outside allowed ingest path: {args[-1]}")
+
+
+def parse_command_line(argv):
+    trusted_args = list(argv)
+    original = os.environ.get("SSH_ORIGINAL_COMMAND", "")
+    if original:
+        parsed = shlex.split(original)
+        if parsed and Path(parsed[0]).name == "cosmos-snapshot-remote":
+            parsed = parsed[1:]
+        for arg in parsed:
+            if arg == "--config" or arg.startswith("--config="):
+                raise SystemExit("SSH_ORIGINAL_COMMAND may not set wrapper option: --config")
+        return trusted_args, parsed
+    if trusted_args:
+        return trusted_args, []
+    raise SystemExit("missing remote command")
+
+
+def split_wrapper_args(argv, original_argv):
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--config")
+    known, rest = parser.parse_known_args(argv)
+    if not known.config:
+        raise SystemExit("--config is required in trusted wrapper arguments")
+    return known.config, [*rest, *original_argv]
+
+
+def parse_operation(argv, allow_client_id_arg):
+    parser = argparse.ArgumentParser(description="Restricted remote command for Cosmos snapshot uploads.")
+    parser.add_argument("operation", choices=["prepare", "rsync", "finalize", "status"])
+    parser.add_argument("--chain", required=True)
+    parser.add_argument("--client-id", default="")
+    args, remainder = parser.parse_known_args(argv)
+
+    if args.client_id and not allow_client_id_arg:
+        raise SystemExit("--client-id is disabled by configuration")
+    return args, remainder
+
+
+def main(argv=None):
+    trusted_argv, original_argv = parse_command_line(sys.argv[1:] if argv is None else argv)
+    config_path, operation_argv = split_wrapper_args(trusted_argv, original_argv)
+    config = parse_env_file(config_path)
+
+    allow_client_id_arg = bool_value(config_value(config, "ALLOW_CLIENT_ID_ARG", "0"))
+    args, remainder = parse_operation(operation_argv, allow_client_id_arg)
+
+    chain = safe_chain_name(args.chain)
+    client_id = args.client_id if allow_client_id_arg and args.client_id else client_id_from_env()
+    access_config = config_value(config, "ACCESS_CONFIG", "/etc/cosmos-snapshot-access.json")
+    ingest_root = config_value(config, "INGEST_ROOT", "/ingest")
+    finalizer_command = config_value(config, "FINALIZER_COMMAND", "/usr/local/sbin/cosmos-snapshot-finalize")
+    rsync_command = shlex.split(config_value(config, "RSYNC_COMMAND", "rsync"))
+
+    access = read_access_config(access_config)
+    require_allowed(access, client_id, chain)
+    chain_root, data_root = chain_paths(ingest_root, chain)
+    marker = chain_root / ".transfer-in-progress"
+
+    if args.operation == "prepare":
+        data_root.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+        print(f"prepared {chain} for client {client_id}")
+        return 0
+
+    if args.operation == "rsync":
+        ensure_rsync_destination(remainder, data_root)
+        command = [*rsync_command, *remainder]
+        subprocess.run(command, check=True, env=safe_subprocess_env())
+        return 0
+
+    if args.operation == "finalize":
+        if not marker.exists():
+            raise SystemExit(f"missing transfer marker: {marker}")
+        marker.unlink()
+        command = [*shlex.split(finalizer_command), "--chain", chain]
+        subprocess.run(command, check=True, env=safe_subprocess_env())
+        return 0
+
+    if args.operation == "status":
+        print(json.dumps({
+            "chain": chain,
+            "client": client_id,
+            "prepared": marker.exists(),
+            "data_path": str(data_root),
+        }, sort_keys=True))
+        return 0
+
+    raise SystemExit(f"unsupported operation: {args.operation}")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -168,6 +168,48 @@ def fail_on_partial_markers(chain_ingest, markers):
         raise SystemExit(f"refusing to package while transfer markers exist: {marker_list}")
 
 
+def validate_db_dir(db_dir, marker_patterns):
+    if not db_dir.is_dir():
+        raise SystemExit(f"missing required Tendermint DB directory: {db_dir}")
+    for pattern in marker_patterns:
+        if any(db_dir.glob(pattern)):
+            return
+    markers = ", ".join(marker_patterns)
+    raise SystemExit(f"required DB directory has no recognizable DB marker ({markers}): {db_dir}")
+
+
+def validate_tendermint_snapshot(source_path, validation_subdir, required_db_dirs, marker_patterns):
+    validation_root = (source_path / validation_subdir).resolve()
+    source_root = source_path.resolve()
+    if validation_root != source_root and source_root not in validation_root.parents:
+        raise SystemExit("validation path escapes source path")
+    if not validation_root.is_dir():
+        raise SystemExit(f"validation data path does not exist: {validation_root}")
+    if not required_db_dirs:
+        raise SystemExit("REQUIRED_DB_DIRS must list at least one Tendermint DB directory")
+    if not marker_patterns:
+        raise SystemExit("DB_MARKER_PATTERNS must list at least one recognizable DB marker")
+    for db_dir in required_db_dirs:
+        db_path = (validation_root / db_dir).resolve()
+        if db_path != validation_root and validation_root not in db_path.parents:
+            raise SystemExit("required DB directory escapes validation path")
+        validate_db_dir(db_path, marker_patterns)
+
+
+def safe_chain_name(chain):
+    if not chain or "/" in chain or chain in {".", ".."}:
+        raise SystemExit("invalid chain name")
+    return chain
+
+
+def contained_path(root, path, message):
+    resolved_root = root.resolve()
+    resolved_path = path.resolve()
+    if resolved_path != resolved_root and resolved_root not in resolved_path.parents:
+        raise SystemExit(message)
+    return resolved_path
+
+
 def managed_archive_pattern(chain):
     return re.compile(rf"^{re.escape(chain)}-\d{{8}}T\d{{6}}Z\.tar\.(zst|gz)$|^{re.escape(chain)}-\d{{8}}T\d{{6}}Z\.tar$")
 
@@ -220,6 +262,7 @@ def main():
     chain = args.chain or config_value(config, "CHAIN")
     if not chain:
         raise SystemExit("CHAIN or --chain is required")
+    chain = safe_chain_name(chain)
 
     ingest_root = Path(config_value(config, "INGEST_ROOT", "/ingest"))
     public_root = Path(config_value(config, "PUBLIC_ROOT", "/snapshots"))
@@ -231,10 +274,13 @@ def main():
     height = args.height or config_value(config, "HEIGHT", "")
     app_version = config_value(config, "APP_VERSION", "")
     pruning = config_value(config, "PRUNING", "")
+    validation_data_subdir = config_value(config, "VALIDATION_DATA_SUBDIR", ".").strip("/") or "."
+    required_db_dirs = shlex.split(config_value(config, "REQUIRED_DB_DIRS", "application.db blockstore.db state.db"))
+    db_marker_patterns = shlex.split(config_value(config, "DB_MARKER_PATTERNS", "CURRENT MANIFEST-* *.sst *.ldb"))
 
-    chain_ingest = ingest_root / chain
-    source_path = chain_ingest / source_subdir
-    output_dir = public_root / chain
+    chain_ingest = contained_path(ingest_root, ingest_root / chain, "chain ingest path escapes ingest root")
+    source_path = contained_path(chain_ingest, chain_ingest / source_subdir, "source path escapes chain ingest path")
+    output_dir = contained_path(public_root, public_root / chain, "public output path escapes public root")
     tmp_dir = output_dir / ".tmp"
 
     if not source_path.is_dir():
@@ -246,6 +292,8 @@ def main():
     extra_excludes = shlex.split(config_value(config, "EXTRA_EXCLUDES", ""))
     exclude_patterns = DEFAULT_EXCLUDES + extra_excludes
 
+    validate_tendermint_snapshot(source_path, validation_data_subdir, required_db_dirs, db_marker_patterns)
+
     suffix = {"zstd": "tar.zst", "gzip": "tar.gz", "none": "tar"}[compression]
     created_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     archive_name = f"{chain}-{utc_stamp()}.{suffix}"
@@ -253,7 +301,7 @@ def main():
     if dry_run:
         print(f"would package {source_path} -> {output_dir / archive_name}")
         print(f"would exclude: {', '.join(exclude_patterns)}")
-        print(f"would update latest.{suffix.split('.', 1)[1] if '.' in suffix else suffix}, latest.sha256, latest.json")
+        print(f"would update latest.{suffix}, latest.sha256, latest.json")
         return 0
 
     tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -277,6 +325,8 @@ def main():
         "sha256": checksum,
         "compression": compression,
         "source_path": f"{ingest_root}/{chain}/{source_subdir}",
+        "validation_data_subdir": validation_data_subdir,
+        "required_db_dirs": required_db_dirs,
         "height": height or None,
         "app_version": app_version or None,
         "pruning": pruning or None,
