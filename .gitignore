@@ -21,6 +21,8 @@ servercerts/
 .env
 .env.*
 !.env.example
+__pycache__/
+*.pyc
 
 # Local editor and OS noise
 .DS_Store

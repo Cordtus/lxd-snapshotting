@@ -1,0 +1,303 @@
+#!/usr/bin/env python3
+import argparse
+import fnmatch
+import hashlib
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tarfile
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+DEFAULT_EXCLUDES = [
+    "config/priv_validator_key.json",
+    "*/config/priv_validator_key.json",
+    "config/node_key.json",
+    "*/config/node_key.json",
+    "keyring-*",
+    "*/keyring-*",
+    "data/priv_validator_state.json",
+    "priv_validator_state.json",
+    "*/priv_validator_state.json",
+]
+
+
+def parse_env_file(path):
+    values = {}
+    if not path:
+        return values
+    config = Path(path)
+    if not config.exists():
+        return values
+    for raw_line in config.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, raw_value = line.split("=", 1)
+        key = key.strip()
+        raw_value = raw_value.strip()
+        if not key:
+            continue
+        try:
+            parsed = shlex.split(raw_value, comments=False, posix=True)
+        except ValueError as exc:
+            raise SystemExit(f"invalid config line for {key}: {exc}") from exc
+        values[key] = parsed[0] if parsed else ""
+    return values
+
+
+def config_value(config, name, default=""):
+    return os.environ.get(name, config.get(name, default))
+
+
+def bool_value(value):
+    return str(value).lower() in {"1", "true", "yes", "on"}
+
+
+def utc_stamp():
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def should_exclude(relative_name, patterns):
+    normalized = relative_name.strip("/")
+    return any(fnmatch.fnmatch(normalized, pattern.strip("/")) for pattern in patterns)
+
+
+def iter_files(root, arc_root, exclude_patterns):
+    for path in sorted(root.rglob("*")):
+        rel = path.relative_to(arc_root).as_posix()
+        if should_exclude(rel, exclude_patterns):
+            continue
+        if any(should_exclude(parent.as_posix(), exclude_patterns) for parent in Path(rel).parents):
+            continue
+        yield path, rel
+
+
+def add_tree(tar, source_path, archive_root, exclude_patterns):
+    for path, rel in iter_files(source_path, archive_root, exclude_patterns):
+        tar.add(path, arcname=rel, recursive=False)
+
+
+def create_python_tar(source_path, archive_root, archive_path, compression, exclude_patterns):
+    mode = "w:gz" if compression == "gzip" else "w"
+    opener = tarfile.open
+    with opener(archive_path, mode) as tar:
+        add_tree(tar, source_path, archive_root, exclude_patterns)
+
+
+def create_zstd_tar(source_path, archive_root, archive_path, level, exclude_patterns):
+    if not shutil.which("tar"):
+        raise SystemExit("zstd compression requires tar")
+    if not shutil.which("zstd"):
+        raise SystemExit("zstd compression requires zstd")
+
+    exclude_args = []
+    for pattern in exclude_patterns:
+        exclude_args.append(f"--exclude={pattern}")
+    command = [
+        "bash",
+        "-o",
+        "pipefail",
+        "-c",
+        "tar --numeric-owner --xattrs --acls -C \"$1\" \"${@:5}\" -cf - \"$2\" | zstd -T0 -q -\"$3\" -o \"$4\"",
+        "cosmos-snapshot-finalize",
+        str(archive_root),
+        source_path.relative_to(archive_root).as_posix(),
+        str(level),
+        str(archive_path),
+        *exclude_args,
+    ]
+    subprocess.run(command, check=True)
+
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def validate_archive(path, compression):
+    if compression == "gzip":
+        with tarfile.open(path, "r:gz") as tar:
+            tar.getmembers()
+        return
+    if compression == "none":
+        with tarfile.open(path, "r:") as tar:
+            tar.getmembers()
+        return
+    if compression == "zstd":
+        if not shutil.which("tar"):
+            raise SystemExit("zstd archive validation requires tar")
+        subprocess.run(["zstd", "-tq", str(path)], check=True)
+        subprocess.run(["tar", "-tf", str(path), "--use-compress-program=zstd"], stdout=subprocess.DEVNULL, check=True)
+        return
+    raise SystemExit(f"unsupported compression: {compression}")
+
+
+def atomic_symlink(target, link_path):
+    tmp_link = link_path.with_name(f".{link_path.name}.tmp")
+    try:
+        tmp_link.unlink()
+    except FileNotFoundError:
+        pass
+    tmp_link.symlink_to(target)
+    os.replace(tmp_link, link_path)
+
+
+def write_text_atomic(path, text):
+    tmp_path = path.with_name(f".{path.name}.tmp")
+    tmp_path.write_text(text)
+    os.replace(tmp_path, path)
+
+
+def fail_on_partial_markers(chain_ingest, markers):
+    found = []
+    for marker in markers:
+        if not marker:
+            continue
+        found.extend(chain_ingest.rglob(marker))
+    if found:
+        marker_list = ", ".join(str(path) for path in sorted(found))
+        raise SystemExit(f"refusing to package while transfer markers exist: {marker_list}")
+
+
+def managed_archive_pattern(chain):
+    return re.compile(rf"^{re.escape(chain)}-\d{{8}}T\d{{6}}Z\.tar\.(zst|gz)$|^{re.escape(chain)}-\d{{8}}T\d{{6}}Z\.tar$")
+
+
+def prune_archives(output_dir, chain, keep, protected_archive=None, dry_run=False):
+    if keep <= 0:
+        return
+    pattern = managed_archive_pattern(chain)
+    archives = sorted(
+        (path for path in output_dir.iterdir() if path.is_file() and pattern.match(path.name)),
+        key=lambda path: path.name,
+        reverse=True,
+    )
+    archive_bases = []
+    for archive in archives:
+        if archive.name.endswith(".sha256") or archive.name.endswith(".json"):
+            continue
+        archive_bases.append(archive)
+    kept = set(archive_bases[:keep])
+    if protected_archive is not None:
+        kept.add(protected_archive)
+    for archive in archive_bases:
+        if archive in kept:
+            continue
+        sidecars = [
+            archive,
+            archive.with_name(f"{archive.name}.sha256"),
+            archive.with_name(f"{archive.name}.json"),
+        ]
+        for path in sidecars:
+            if dry_run:
+                print(f"would remove {path}")
+            else:
+                path.unlink(missing_ok=True)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Package and publish a Cosmos/Tendermint snapshot from builder ingest storage.")
+    parser.add_argument("--config", default=os.environ.get("COSMOS_SNAPSHOT_FINALIZER_CONFIG", "/etc/cosmos-snapshot-finalizer.env"))
+    parser.add_argument("--chain")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--height")
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    config = parse_env_file(args.config)
+
+    chain = args.chain or config_value(config, "CHAIN")
+    if not chain:
+        raise SystemExit("CHAIN or --chain is required")
+
+    ingest_root = Path(config_value(config, "INGEST_ROOT", "/ingest"))
+    public_root = Path(config_value(config, "PUBLIC_ROOT", "/snapshots"))
+    source_subdir = config_value(config, "SOURCE_SUBDIR", "data").strip("/")
+    compression = config_value(config, "COMPRESSION", "zstd")
+    zstd_level = int(config_value(config, "ZSTD_LEVEL", "8"))
+    keep_archives = int(config_value(config, "KEEP_ARCHIVES", "3"))
+    dry_run = args.dry_run or bool_value(config_value(config, "DRY_RUN", "0"))
+    height = args.height or config_value(config, "HEIGHT", "")
+    app_version = config_value(config, "APP_VERSION", "")
+    pruning = config_value(config, "PRUNING", "")
+
+    chain_ingest = ingest_root / chain
+    source_path = chain_ingest / source_subdir
+    output_dir = public_root / chain
+    tmp_dir = output_dir / ".tmp"
+
+    if not source_path.is_dir():
+        raise SystemExit(f"source path does not exist or is not a directory: {source_path}")
+
+    markers = shlex.split(config_value(config, "PARTIAL_MARKERS", ".transfer-in-progress .rsync-partial .uploading .incomplete"))
+    fail_on_partial_markers(chain_ingest, markers)
+
+    extra_excludes = shlex.split(config_value(config, "EXTRA_EXCLUDES", ""))
+    exclude_patterns = DEFAULT_EXCLUDES + extra_excludes
+
+    suffix = {"zstd": "tar.zst", "gzip": "tar.gz", "none": "tar"}[compression]
+    created_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    archive_name = f"{chain}-{utc_stamp()}.{suffix}"
+
+    if dry_run:
+        print(f"would package {source_path} -> {output_dir / archive_name}")
+        print(f"would exclude: {', '.join(exclude_patterns)}")
+        print(f"would update latest.{suffix.split('.', 1)[1] if '.' in suffix else suffix}, latest.sha256, latest.json")
+        return 0
+
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    archive_tmp = tmp_dir / f".{archive_name}.tmp"
+
+    if compression == "zstd":
+        create_zstd_tar(source_path, chain_ingest, archive_tmp, zstd_level, exclude_patterns)
+    else:
+        create_python_tar(source_path, chain_ingest, archive_tmp, compression, exclude_patterns)
+
+    validate_archive(archive_tmp, compression)
+    checksum = sha256_file(archive_tmp)
+    archive_bytes = archive_tmp.stat().st_size
+
+    manifest = {
+        "chain": chain,
+        "archive": archive_name,
+        "created_at": created_at,
+        "bytes": archive_bytes,
+        "sha256": checksum,
+        "compression": compression,
+        "source_path": f"{ingest_root}/{chain}/{source_subdir}",
+        "height": height or None,
+        "app_version": app_version or None,
+        "pruning": pruning or None,
+    }
+
+    archive_final = output_dir / archive_name
+    checksum_final = output_dir / f"{archive_name}.sha256"
+    manifest_final = output_dir / f"{archive_name}.json"
+
+    os.replace(archive_tmp, archive_final)
+    write_text_atomic(checksum_final, f"{checksum}  {archive_name}\n")
+    write_text_atomic(manifest_final, json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+
+    atomic_symlink(archive_name, output_dir / f"latest.{suffix}")
+    atomic_symlink(f"{archive_name}.sha256", output_dir / "latest.sha256")
+    atomic_symlink(f"{archive_name}.json", output_dir / "latest.json")
+
+    prune_archives(output_dir, chain, keep_archives, protected_archive=archive_final)
+    print(json.dumps(manifest, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

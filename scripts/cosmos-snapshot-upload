@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+import argparse
+import os
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+
+
+def parse_env_file(path):
+    values = {}
+    if not path:
+        return values
+    config = Path(path)
+    if not config.exists():
+        return values
+    for raw_line in config.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, raw_value = line.split("=", 1)
+        try:
+            parsed = shlex.split(raw_value.strip(), comments=False, posix=True)
+        except ValueError as exc:
+            raise SystemExit(f"invalid config line for {key.strip()}: {exc}") from exc
+        values[key.strip()] = parsed[0] if parsed else ""
+    return values
+
+
+def config_value(config, name, default=""):
+    return os.environ.get(name, config.get(name, default))
+
+
+def bool_value(value):
+    return str(value).lower() in {"1", "true", "yes", "on"}
+
+
+def run(command, dry_run):
+    print(shlex.join(command))
+    if not dry_run:
+        subprocess.run(command, check=True)
+
+
+def ssh_command(builder, port, ssh_options, remote_command):
+    command = ["ssh"]
+    if port:
+        command += ["-p", str(port)]
+    if ssh_options:
+        command += shlex.split(ssh_options)
+    command += [builder, remote_command]
+    return command
+
+
+def rsync_command(source_path, builder, remote_data_path, port, ssh_options, delete, extra_args):
+    ssh_parts = ["ssh"]
+    if port:
+        ssh_parts += ["-p", str(port)]
+    if ssh_options:
+        ssh_parts += shlex.split(ssh_options)
+
+    command = [
+        "rsync",
+        "-a",
+        "--partial",
+        "--info=progress2",
+    ]
+    if delete:
+        command.append("--delete")
+    if extra_args:
+        command += shlex.split(extra_args)
+    command += ["-e", shlex.join(ssh_parts), f"{source_path.rstrip('/')}/", f"{builder}:{remote_data_path.rstrip('/')}/"]
+    return command
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Rsync a consistent Cosmos/Tendermint DB view to a snapshot builder and trigger finalization.")
+    parser.add_argument("--config", default=os.environ.get("COSMOS_SNAPSHOT_UPLOAD_CONFIG", "./source-upload.env"))
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--no-finalize", action="store_true")
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    config = parse_env_file(args.config)
+
+    chain = config_value(config, "CHAIN")
+    source_path = config_value(config, "SOURCE_PATH")
+    builder = config_value(config, "BUILDER_SSH")
+    builder_port = config_value(config, "BUILDER_SSH_PORT", "22")
+    ssh_options = config_value(config, "SSH_OPTIONS", "")
+    remote_ingest_root = config_value(config, "REMOTE_INGEST_ROOT", "/ingest").rstrip("/")
+    finalizer_command = config_value(config, "FINALIZER_COMMAND", "sudo /usr/local/sbin/cosmos-snapshot-finalize")
+    rsync_delete = bool_value(config_value(config, "RSYNC_DELETE", "1"))
+    rsync_extra_args = config_value(config, "RSYNC_EXTRA_ARGS", "--numeric-ids")
+    run_finalizer = bool_value(config_value(config, "RUN_FINALIZER", "1")) and not args.no_finalize
+    dry_run = args.dry_run or bool_value(config_value(config, "DRY_RUN", "0"))
+
+    missing = [name for name, value in {
+        "CHAIN": chain,
+        "SOURCE_PATH": source_path,
+        "BUILDER_SSH": builder,
+    }.items() if not value]
+    if missing:
+        raise SystemExit(f"missing required config: {', '.join(missing)}")
+
+    if not dry_run and not Path(source_path).is_dir():
+        raise SystemExit(f"source path does not exist or is not a directory: {source_path}")
+
+    remote_chain_path = f"{remote_ingest_root}/{chain}"
+    remote_data_path = f"{remote_chain_path}/data"
+    marker_path = f"{remote_chain_path}/.transfer-in-progress"
+
+    run(ssh_command(builder, builder_port, ssh_options, f"mkdir -p {shlex.quote(remote_data_path)} && touch {shlex.quote(marker_path)}"), dry_run)
+    try:
+        run(rsync_command(source_path, builder, remote_data_path, builder_port, ssh_options, rsync_delete, rsync_extra_args), dry_run)
+    except Exception:
+        print(f"transfer failed; marker left in place for finalizer safety: {marker_path}", file=sys.stderr)
+        raise
+
+    run(ssh_command(builder, builder_port, ssh_options, f"rm -f {shlex.quote(marker_path)}"), dry_run)
+
+    if run_finalizer:
+        run(ssh_command(builder, builder_port, ssh_options, f"{finalizer_command} --chain {shlex.quote(chain)}"), dry_run)
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
