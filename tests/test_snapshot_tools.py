@@ -1,13 +1,21 @@
 import hashlib
+import importlib.machinery
+import importlib.util
+import io
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import unittest
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 
@@ -45,8 +53,9 @@ class SnapshotToolTests(unittest.TestCase):
         (chain_root / "keyring-test" / "key").write_text("secret")
         return chain_root
 
-    def make_source_data(self, root):
-        data = root / "live-data"
+    def make_source_node_home(self, root, name="node-home", data_subdir="data"):
+        node_home = root / name
+        data = node_home / data_subdir
         for db_dir in ["application.db", "blockstore.db", "state.db", "evidence.db", "tx_index.db"]:
             (data / db_dir).mkdir(parents=True)
             (data / db_dir / "CURRENT").write_text(f"{db_dir}-current")
@@ -55,7 +64,29 @@ class SnapshotToolTests(unittest.TestCase):
         (data / "snapshots").mkdir()
         (data / "snapshots" / "chunk").write_text("state sync chunk")
         (data / "priv_validator_state.json").write_text('{"height":"1"}')
-        return data
+        (node_home / "config").mkdir()
+        (node_home / "config" / "priv_validator_key.json").write_text('{"secret":"validator"}')
+        (node_home / "keyring-test").mkdir()
+        (node_home / "keyring-test" / "key").write_text("secret")
+        (node_home / "ibc_08-wasm_client_data").mkdir()
+        (node_home / "ibc_08-wasm_client_data" / "client").write_text("private client data")
+        return node_home
+
+    def make_source_data(self, root):
+        return self.make_source_node_home(root) / "data"
+
+    def upload_config_lines(self, node_home, staging, extra_lines=None, data_subdir="data"):
+        lines = [
+            "CHAIN=\"examplechain\"",
+            f"NODE_HOME=\"{node_home}\"",
+            f"DATA_SUBDIR=\"{data_subdir}\"",
+            f"STAGING_PATH=\"{staging}\"",
+            "SERVICE_NAME=\"examplechaind.service\"",
+            "BUILDER_SSH=\"snapupload@snapshot-builder.vpn\"",
+        ]
+        if extra_lines:
+            lines.extend(extra_lines)
+        return lines
 
     def write_fake_command(self, directory, name, log_path, exit_code=0):
         command = directory / name
@@ -69,6 +100,32 @@ class SnapshotToolTests(unittest.TestCase):
         command.chmod(command.stat().st_mode | stat.S_IXUSR)
         return command
 
+    def write_fake_ssh_receiving_stdin(self, directory, log_path):
+        command = directory / "ssh"
+        command.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, sys\n"
+            "payload = sys.stdin.buffer.read()\n"
+            f"with open({str(log_path)!r}, 'a') as handle:\n"
+            "    handle.write(json.dumps(['ssh', sys.argv[1:], len(payload)]) + '\\n')\n"
+        )
+        command.chmod(command.stat().st_mode | stat.S_IXUSR)
+        return command
+
+    def write_fake_ssh_capturing_stdin(self, directory, log_path, payload_path):
+        command = directory / "ssh"
+        command.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, sys\n"
+            "payload = sys.stdin.buffer.read()\n"
+            "if payload:\n"
+            f"    open({str(payload_path)!r}, 'wb').write(payload)\n"
+            f"with open({str(log_path)!r}, 'a') as handle:\n"
+            "    handle.write(json.dumps(['ssh', sys.argv[1:], len(payload)]) + '\\n')\n"
+        )
+        command.chmod(command.stat().st_mode | stat.S_IXUSR)
+        return command
+
     def write_fake_rsync(self, directory, log_path):
         command = directory / "rsync"
         command.write_text(
@@ -78,6 +135,9 @@ class SnapshotToolTests(unittest.TestCase):
             f"with open({str(log_path)!r}, 'a') as handle:\n"
             "    handle.write(json.dumps(['rsync', args]) + '\\n')\n"
             "if '--dry-run' in args:\n"
+            "    noisy_short = any(arg.startswith('-') and not arg.startswith('--') and any(flag in arg[1:] for flag in ['v', 'P']) for arg in args)\n"
+            "    if (any(arg == '--info=progress2' for arg in args) or noisy_short or '--stats' in args) and os.environ.get('FAKE_RSYNC_VERIFY_PROGRESS'):\n"
+            "        print('          0 100%    0.00kB/s    0:00:00')\n"
             "    if os.environ.get('FAKE_RSYNC_VERIFY_CHANGES'):\n"
             "        print('>f+++++++++ application.db/CURRENT')\n"
             "    raise SystemExit(0)\n"
@@ -95,6 +155,106 @@ class SnapshotToolTests(unittest.TestCase):
 
     def read_json_lines(self, path):
         return [json.loads(line) for line in path.read_text().splitlines()]
+
+    def load_uploader_module(self):
+        loader = importlib.machinery.SourceFileLoader("cosmos_snapshot_upload", str(UPLOADER))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        module = importlib.util.module_from_spec(spec)
+        loader.exec_module(module)
+        return module
+
+    def run_uploader_ui_server(self, module, config_path):
+        server = module.http.server.ThreadingHTTPServer(("127.0.0.1", 0), module.make_config_ui_handler(config_path))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        return server, f"http://127.0.0.1:{server.server_address[1]}"
+
+    def test_uploader_config_ui_saves_only_client_exposed_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            module = self.load_uploader_module()
+            config = tmp_path / "source-upload.env"
+            module.write_source_config(config, {
+                "CHAIN": "serverchain",
+                "BUILDER_SSH": "snapupload@snapshot-builder.vpn",
+                "NODE_HOME": "~/.genesisd",
+                "STAGING_PATH": "/var/tmp/original-stage",
+            })
+            server, base_url = self.run_uploader_ui_server(module, config)
+            try:
+                page = urllib.request.urlopen(base_url, timeout=5).read().decode()
+                self.assertIn("Snapshot upload settings", page)
+                self.assertIn("Server-managed values", page)
+
+                payload = urllib.parse.urlencode({
+                    "CHAIN": "attackerchain",
+                    "BUILDER_SSH": "attacker@example.invalid",
+                    "BUILDER_SSH_PORT": "22",
+                    "REMOTE_COMMAND": "/tmp/attacker-command",
+                    "NODE_HOME": "/mnt/node/.genesisd",
+                    "DATA_SUBDIR": "custom/data",
+                    "SERVICE_NAME": "genesisd@sync.service",
+                    "SYSTEMCTL_COMMAND": "sudo systemctl",
+                    "STAGING_PATH": "/mnt/snapshot-stage/genesisd",
+                    "UPLOAD_SCHEDULE": "Sun *-*-* 04:00:00",
+                }).encode()
+                request = urllib.request.Request(base_url, data=payload, method="POST")
+                saved_page = urllib.request.urlopen(request, timeout=5).read().decode()
+                self.assertIn("Saved client settings", saved_page)
+
+                saved = module.parse_env_file(config)
+                self.assertEqual(saved["CHAIN"], "serverchain")
+                self.assertEqual(saved["BUILDER_SSH"], "snapupload@snapshot-builder.vpn")
+                self.assertEqual(saved["BUILDER_SSH_PORT"], "2222")
+                self.assertEqual(saved["REMOTE_COMMAND"], "cosmos-snapshot-remote")
+                self.assertEqual(saved["NODE_HOME"], "/mnt/node/.genesisd")
+                self.assertEqual(saved["DATA_SUBDIR"], "custom/data")
+                self.assertEqual(saved["SERVICE_NAME"], "genesisd@sync.service")
+                self.assertEqual(saved["SYSTEMCTL_COMMAND"], "sudo systemctl")
+                self.assertEqual(saved["STAGING_PATH"], "/mnt/snapshot-stage/genesisd")
+                self.assertEqual(saved["UPLOAD_SCHEDULE"], "Sun *-*-* 04:00:00")
+            finally:
+                server.shutdown()
+                server.server_close()
+
+    def test_uploader_config_ui_rejects_invalid_client_value(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            module = self.load_uploader_module()
+            config = tmp_path / "source-upload.env"
+            module.write_source_config(config, {"CHAIN": "serverchain", "STAGING_PATH": "/var/tmp/original-stage"})
+            before = config.read_text()
+            server, base_url = self.run_uploader_ui_server(module, config)
+            try:
+                valid_payload = {
+                    "NODE_HOME": "~/.genesisd",
+                    "DATA_SUBDIR": "data",
+                    "SERVICE_NAME": "genesisd.service",
+                    "SYSTEMCTL_COMMAND": "systemctl",
+                    "STAGING_PATH": "/tmp/stage",
+                    "UPLOAD_SCHEDULE": "Mon *-*-* 03:15:00",
+                }
+                invalid_cases = {
+                    "NODE_HOME": "/mnt/node home/.genesisd",
+                    "DATA_SUBDIR": "../data",
+                    "SERVICE_NAME": "genesisd service",
+                    "SYSTEMCTL_COMMAND": "service genesisd stop",
+                    "STAGING_PATH": "/tmp/stage;rm-rf",
+                    "UPLOAD_SCHEDULE": "Mon *-*-* 03:15:00; rm -rf /",
+                }
+                for field, invalid_value in invalid_cases.items():
+                    with self.subTest(field=field):
+                        payload_values = {**valid_payload, field: invalid_value}
+                        payload = urllib.parse.urlencode(payload_values).encode()
+                        request = urllib.request.Request(base_url, data=payload, method="POST")
+                        with self.assertRaises(urllib.error.HTTPError) as ctx:
+                            urllib.request.urlopen(request, timeout=5)
+                        self.assertEqual(ctx.exception.code, 400)
+                        self.assertIn("Fix the highlighted values", ctx.exception.read().decode())
+                        self.assertEqual(config.read_text(), before)
+            finally:
+                server.shutdown()
+                server.server_close()
 
     def test_finalizer_packages_data_excludes_validator_state_and_updates_latest(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -277,23 +437,19 @@ class SnapshotToolTests(unittest.TestCase):
     def test_upload_dry_run_marks_transfer_rsyncs_and_triggers_finalizer(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            data = tmp_path / "live-data"
+            node_home = tmp_path / "node-home"
+            data = node_home / "data"
             staging = tmp_path / "staging-data"
             config = tmp_path / "upload.env"
             config.write_text(
-                "\n".join([
-                    "CHAIN=\"examplechain\"",
-                    f"DATA_PATH=\"{data}\"",
-                    f"STAGING_PATH=\"{staging}\"",
-                    "SERVICE_NAME=\"examplechaind.service\"",
-                    "BUILDER_SSH=\"snapupload@snapshot-builder.example\"",
+                "\n".join(self.upload_config_lines(node_home, staging, [
                     "BUILDER_SSH_PORT=2222",
                     "SSH_OPTIONS=\"-o BatchMode=yes\"",
                     "REMOTE_COMMAND=\"cosmos-snapshot-remote\"",
                     "RSYNC_DELETE=1",
-                    "RSYNC_EXTRA_ARGS=\"--numeric-ids\"",
+                    "RSYNC_EXTRA_ARGS=\"--numeric-ids --stats --info=progress2 -v -vv -P -avz\"",
                     "RUN_FINALIZER=1",
-                ])
+                ]))
             )
 
             result = self.run_cmd([UPLOADER, "--config", config, "--dry-run"])
@@ -305,19 +461,48 @@ class SnapshotToolTests(unittest.TestCase):
             self.assertIn(f"would create staging directory {staging}", output)
             self.assertIn(f"{data}/application.db/ {staging}/application.db/", output)
             self.assertIn("cosmos-snapshot-remote prepare --chain examplechain", output)
-            self.assertIn("rsync -a --partial --info=progress2", output)
+            self.assertIn("rsync -a --partial", output)
+            self.assertIn("--info=progress2", output)
             self.assertIn("--dry-run --itemize-changes", output)
             self.assertIn("--rsync-path=cosmos-snapshot-remote rsync --chain examplechain", output)
             self.assertIn("ssh -p 2222 -o BatchMode=yes", output)
-            self.assertIn("snapupload@snapshot-builder.example:snapshot-upload-examplechain/", output)
+            self.assertIn("snapupload@snapshot-builder.vpn:snapshot-upload-examplechain/", output)
             self.assertIn("cosmos-snapshot-remote finalize --chain examplechain", output)
             self.assertIn("systemctl start examplechaind.service", output)
+            self.assertNotIn("/ingest", output)
+
+    def test_upload_bootstrap_dry_run_streams_archive_then_verifies_and_finalizes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            node_home = tmp_path / "node-home"
+            staging = tmp_path / "staging-data"
+            config = tmp_path / "upload.env"
+            config.write_text(
+                "\n".join(self.upload_config_lines(node_home, staging, [
+                    "BUILDER_SSH_PORT=2222",
+                    "SSH_OPTIONS=\"-o BatchMode=yes\"",
+                    "REMOTE_COMMAND=\"cosmos-snapshot-remote\"",
+                    "BOOTSTRAP_UPLOAD=1",
+                    "RUN_FINALIZER=1",
+                ]))
+            )
+
+            result = self.run_cmd([UPLOADER, "--config", config, "--dry-run"])
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            output = result.stdout
+            self.assertIn("cosmos-snapshot-remote prepare --chain examplechain", output)
+            self.assertIn(f"tar -C {staging} -cf - . | ssh -p 2222 -o BatchMode=yes", output)
+            self.assertIn("cosmos-snapshot-remote bootstrap --chain examplechain", output)
+            self.assertIn("--dry-run --itemize-changes", output)
+            self.assertIn("cosmos-snapshot-remote finalize --chain examplechain", output)
             self.assertNotIn("/ingest", output)
 
     def test_upload_stages_public_db_dirs_then_rsyncs_and_finalizes(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            source = self.make_source_data(tmp_path)
+            node_home = self.make_source_node_home(tmp_path)
+            source = node_home / "data"
             staging = tmp_path / "staging-data"
             bin_dir = tmp_path / "bin"
             log_path = tmp_path / "commands.jsonl"
@@ -328,24 +513,20 @@ class SnapshotToolTests(unittest.TestCase):
             self.write_fake_rsync(bin_dir, log_path)
             config = tmp_path / "upload.env"
             config.write_text(
-                "\n".join([
-                    "CHAIN=\"examplechain\"",
-                    f"DATA_PATH=\"{source}\"",
-                    f"STAGING_PATH=\"{staging}\"",
-                    "SERVICE_NAME=\"examplechaind.service\"",
-                    "BUILDER_SSH=\"snapupload@snapshot-builder.example\"",
+                "\n".join(self.upload_config_lines(node_home, staging, [
                     "BUILDER_SSH_PORT=2222",
                     "SSH_OPTIONS=\"-o BatchMode=yes\"",
                     "REMOTE_COMMAND=\"cosmos-snapshot-remote\"",
                     "RSYNC_DELETE=1",
-                    "RSYNC_EXTRA_ARGS=\"--numeric-ids\"",
+                    "RSYNC_EXTRA_ARGS=\"--numeric-ids --stats --info=progress2 -v -vv -P -avz\"",
                     "RUN_FINALIZER=1",
-                ])
+                ]))
             )
 
             result = self.run_cmd([UPLOADER, "--config", config], env={
                 **os.environ,
                 "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                "FAKE_RSYNC_VERIFY_PROGRESS": "1",
             })
 
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -358,9 +539,24 @@ class SnapshotToolTests(unittest.TestCase):
             self.assertEqual(entries[10][0], "ssh")
             self.assertIn("cosmos-snapshot-remote prepare --chain examplechain", entries[7][1][-1])
             self.assertTrue(any(arg.startswith("--rsync-path=cosmos-snapshot-remote rsync --chain examplechain") for arg in entries[8][1]))
-            self.assertIn("snapupload@snapshot-builder.example:snapshot-upload-examplechain/", entries[8][1][-1])
+            self.assertEqual(entries[8][1][-2], f"{staging}/")
+            self.assertIn("--stats", entries[8][1])
+            self.assertIn("-v", entries[8][1])
+            self.assertIn("-vv", entries[8][1])
+            self.assertIn("-P", entries[8][1])
+            self.assertIn("-avz", entries[8][1])
+            self.assertIn("snapupload@snapshot-builder.vpn:snapshot-upload-examplechain/", entries[8][1][-1])
             self.assertIn("--dry-run", entries[9][1])
             self.assertIn("--itemize-changes", entries[9][1])
+            self.assertIn("--checksum", entries[9][1])
+            self.assertNotIn("--info=progress2", entries[9][1])
+            self.assertNotIn("--stats", entries[9][1])
+            self.assertNotIn("-v", entries[9][1])
+            self.assertNotIn("-vv", entries[9][1])
+            self.assertNotIn("-P", entries[9][1])
+            self.assertNotIn("-avz", entries[9][1])
+            self.assertIn("-az", entries[9][1])
+            self.assertEqual(entries[9][1][-2], f"{staging}/")
             self.assertIn("cosmos-snapshot-remote finalize --chain examplechain", entries[10][1][-1])
             self.assertTrue((staging / "application.db" / "CURRENT").exists())
             self.assertTrue((staging / "blockstore.db" / "CURRENT").exists())
@@ -370,12 +566,17 @@ class SnapshotToolTests(unittest.TestCase):
             self.assertFalse((staging / "priv_validator_state.json").exists())
             self.assertFalse((staging / "snapshots").exists())
             self.assertFalse((staging / "cs.wal").exists())
+            self.assertFalse((staging / "config").exists())
+            self.assertFalse((staging / "keyring-test").exists())
+            self.assertFalse((staging / "ibc_08-wasm_client_data").exists())
 
-    def test_upload_does_not_finalize_after_rsync_failure(self):
+    def test_upload_expands_tilde_node_home_and_staging_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            source = self.make_source_data(tmp_path)
-            staging = tmp_path / "staging-data"
+            home = tmp_path / "home"
+            home.mkdir()
+            self.make_source_node_home(home, ".genesisd")
+            staging = home / "snapshot-stage"
             bin_dir = tmp_path / "bin"
             log_path = tmp_path / "commands.jsonl"
             bin_dir.mkdir()
@@ -386,14 +587,369 @@ class SnapshotToolTests(unittest.TestCase):
             config.write_text(
                 "\n".join([
                     "CHAIN=\"examplechain\"",
-                    f"DATA_PATH=\"{source}\"",
-                    f"STAGING_PATH=\"{staging}\"",
+                    "NODE_HOME=\"~/.genesisd\"",
+                    "DATA_SUBDIR=\"data\"",
+                    "STAGING_PATH=\"~/snapshot-stage\"",
                     "SERVICE_NAME=\"examplechaind.service\"",
-                    "BUILDER_SSH=\"snapupload@snapshot-builder.example\"",
+                    "BUILDER_SSH=\"snapupload@snapshot-builder.vpn\"",
+                    "REMOTE_COMMAND=\"cosmos-snapshot-remote\"",
+                    "RUN_FINALIZER=0",
+                ])
+            )
+
+            result = self.run_cmd([UPLOADER, "--config", config], env={
+                **os.environ,
+                "HOME": str(home),
+                "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            })
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((staging / "application.db" / "CURRENT").exists())
+            self.assertFalse((staging / "config").exists())
+
+    def test_upload_honors_custom_data_subdir_under_node_home(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            node_home = self.make_source_node_home(tmp_path, data_subdir="custom-data")
+            staging = tmp_path / "staging-data"
+            bin_dir = tmp_path / "bin"
+            log_path = tmp_path / "commands.jsonl"
+            bin_dir.mkdir()
+            self.write_fake_command(bin_dir, "ssh", log_path)
+            self.write_fake_command(bin_dir, "systemctl", log_path)
+            self.write_fake_rsync(bin_dir, log_path)
+            config = tmp_path / "upload.env"
+            config.write_text(
+                "\n".join(self.upload_config_lines(
+                    node_home,
+                    staging,
+                    ["REMOTE_COMMAND=\"cosmos-snapshot-remote\"", "RUN_FINALIZER=0"],
+                    data_subdir="custom-data",
+                ))
+            )
+
+            result = self.run_cmd([UPLOADER, "--config", config], env={
+                **os.environ,
+                "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            })
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            entries = self.read_json_lines(log_path)
+            self.assertIn(f"{node_home}/custom-data/application.db/", entries[1][1][-2])
+            self.assertTrue((staging / "application.db" / "CURRENT").exists())
+
+    def test_upload_rejects_escaping_data_subdir_before_stopping_service(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            node_home = self.make_source_node_home(tmp_path)
+            staging = tmp_path / "staging-data"
+            bin_dir = tmp_path / "bin"
+            log_path = tmp_path / "commands.jsonl"
+            bin_dir.mkdir()
+            self.write_fake_command(bin_dir, "systemctl", log_path)
+            self.write_fake_rsync(bin_dir, log_path)
+            self.write_fake_command(bin_dir, "ssh", log_path)
+            config = tmp_path / "upload.env"
+            config.write_text(
+                "\n".join(self.upload_config_lines(
+                    node_home,
+                    staging,
+                    ["REMOTE_COMMAND=\"cosmos-snapshot-remote\""],
+                    data_subdir="../other-data",
+                ))
+            )
+
+            result = self.run_cmd([UPLOADER, "--config", config], env={
+                **os.environ,
+                "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            })
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("DATA_SUBDIR must be a relative path under NODE_HOME", result.stderr)
+            self.assertFalse(log_path.exists())
+
+    def test_upload_rejects_symlinked_data_subdir_escape_before_stopping_service(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            node_home = self.make_source_node_home(tmp_path)
+            shutil.rmtree(node_home / "data")
+            outside = self.make_source_node_home(tmp_path, name="outside-node") / "data"
+            (node_home / "data").symlink_to(outside, target_is_directory=True)
+            staging = tmp_path / "staging-data"
+            bin_dir = tmp_path / "bin"
+            log_path = tmp_path / "commands.jsonl"
+            bin_dir.mkdir()
+            self.write_fake_command(bin_dir, "systemctl", log_path)
+            self.write_fake_rsync(bin_dir, log_path)
+            self.write_fake_command(bin_dir, "ssh", log_path)
+            config = tmp_path / "upload.env"
+            config.write_text("\n".join(self.upload_config_lines(node_home, staging)))
+
+            result = self.run_cmd([UPLOADER, "--config", config], env={
+                **os.environ,
+                "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            })
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("DATA_SUBDIR must resolve under NODE_HOME", result.stderr)
+            self.assertFalse(log_path.exists())
+
+    def test_upload_rejects_source_db_symlink_escape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            node_home = self.make_source_node_home(tmp_path)
+            application_db = node_home / "data" / "application.db"
+            shutil.rmtree(application_db)
+            outside = tmp_path / "outside-application.db"
+            outside.mkdir()
+            (outside / "CURRENT").write_text("outside-current")
+            application_db.symlink_to(outside, target_is_directory=True)
+            staging = tmp_path / "staging-data"
+            bin_dir = tmp_path / "bin"
+            log_path = tmp_path / "commands.jsonl"
+            bin_dir.mkdir()
+            self.write_fake_command(bin_dir, "systemctl", log_path)
+            self.write_fake_rsync(bin_dir, log_path)
+            self.write_fake_command(bin_dir, "ssh", log_path)
+            config = tmp_path / "upload.env"
+            config.write_text("\n".join(self.upload_config_lines(node_home, staging)))
+
+            result = self.run_cmd([UPLOADER, "--config", config], env={
+                **os.environ,
+                "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            })
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("source DB directory must not be a symlink", result.stderr)
+            self.assertFalse((staging / "application.db").exists())
+            self.assertEqual(self.read_json_lines(log_path), [
+                ["systemctl", ["stop", "examplechaind.service"]],
+                ["systemctl", ["start", "examplechaind.service"]],
+            ])
+
+    def test_upload_rejects_optional_source_db_symlink_before_staging_any_db(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            node_home = self.make_source_node_home(tmp_path)
+            evidence_db = node_home / "data" / "evidence.db"
+            shutil.rmtree(evidence_db)
+            outside = tmp_path / "outside-evidence.db"
+            outside.mkdir()
+            (outside / "CURRENT").write_text("outside-current")
+            evidence_db.symlink_to(outside, target_is_directory=True)
+            staging = tmp_path / "staging-data"
+            bin_dir = tmp_path / "bin"
+            log_path = tmp_path / "commands.jsonl"
+            bin_dir.mkdir()
+            self.write_fake_command(bin_dir, "systemctl", log_path)
+            self.write_fake_rsync(bin_dir, log_path)
+            self.write_fake_command(bin_dir, "ssh", log_path)
+            config = tmp_path / "upload.env"
+            config.write_text("\n".join(self.upload_config_lines(node_home, staging)))
+
+            result = self.run_cmd([UPLOADER, "--config", config], env={
+                **os.environ,
+                "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            })
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("source DB directory must not be a symlink", result.stderr)
+            self.assertFalse((staging / "application.db").exists())
+            self.assertEqual(self.read_json_lines(log_path), [
+                ["systemctl", ["stop", "examplechaind.service"]],
+                ["systemctl", ["start", "examplechaind.service"]],
+            ])
+
+    def test_upload_rejects_broken_optional_source_db_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            node_home = self.make_source_node_home(tmp_path)
+            evidence_db = node_home / "data" / "evidence.db"
+            shutil.rmtree(evidence_db)
+            evidence_db.symlink_to(tmp_path / "missing-evidence.db", target_is_directory=True)
+            staging = tmp_path / "staging-data"
+            bin_dir = tmp_path / "bin"
+            log_path = tmp_path / "commands.jsonl"
+            bin_dir.mkdir()
+            self.write_fake_command(bin_dir, "systemctl", log_path)
+            self.write_fake_rsync(bin_dir, log_path)
+            self.write_fake_command(bin_dir, "ssh", log_path)
+            config = tmp_path / "upload.env"
+            config.write_text("\n".join(self.upload_config_lines(node_home, staging)))
+
+            result = self.run_cmd([UPLOADER, "--config", config], env={
+                **os.environ,
+                "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            })
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("source DB directory must not be a symlink", result.stderr)
+            self.assertFalse((staging / "application.db").exists())
+            self.assertEqual(self.read_json_lines(log_path), [
+                ["systemctl", ["stop", "examplechaind.service"]],
+                ["systemctl", ["start", "examplechaind.service"]],
+            ])
+
+    def test_upload_rejects_existing_staging_db_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            node_home = self.make_source_node_home(tmp_path)
+            staging = tmp_path / "staging-data"
+            outside = tmp_path / "outside-staging"
+            outside.mkdir()
+            staging.mkdir()
+            (staging / "application.db").symlink_to(outside, target_is_directory=True)
+            bin_dir = tmp_path / "bin"
+            log_path = tmp_path / "commands.jsonl"
+            bin_dir.mkdir()
+            self.write_fake_command(bin_dir, "systemctl", log_path)
+            self.write_fake_rsync(bin_dir, log_path)
+            self.write_fake_command(bin_dir, "ssh", log_path)
+            config = tmp_path / "upload.env"
+            config.write_text("\n".join(self.upload_config_lines(node_home, staging)))
+
+            result = self.run_cmd([UPLOADER, "--config", config], env={
+                **os.environ,
+                "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            })
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("staging DB directory must not be a symlink", result.stderr)
+            self.assertFalse((outside / "CURRENT").exists())
+            self.assertEqual(self.read_json_lines(log_path), [
+                ["systemctl", ["stop", "examplechaind.service"]],
+                ["systemctl", ["start", "examplechaind.service"]],
+            ])
+
+    def test_upload_rejects_broken_staging_db_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            node_home = self.make_source_node_home(tmp_path)
+            staging = tmp_path / "staging-data"
+            staging.mkdir()
+            (staging / "application.db").symlink_to(tmp_path / "missing-staging-target", target_is_directory=True)
+            bin_dir = tmp_path / "bin"
+            log_path = tmp_path / "commands.jsonl"
+            bin_dir.mkdir()
+            self.write_fake_command(bin_dir, "systemctl", log_path)
+            self.write_fake_rsync(bin_dir, log_path)
+            self.write_fake_command(bin_dir, "ssh", log_path)
+            config = tmp_path / "upload.env"
+            config.write_text("\n".join(self.upload_config_lines(node_home, staging)))
+
+            result = self.run_cmd([UPLOADER, "--config", config], env={
+                **os.environ,
+                "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            })
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("staging DB directory must not be a symlink", result.stderr)
+            self.assertEqual(self.read_json_lines(log_path), [
+                ["systemctl", ["stop", "examplechaind.service"]],
+                ["systemctl", ["start", "examplechaind.service"]],
+            ])
+
+    def test_upload_bootstrap_flag_streams_staged_archive_then_verifies_and_finalizes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            node_home = self.make_source_node_home(tmp_path)
+            source = node_home / "data"
+            staging = tmp_path / "staging-data"
+            bin_dir = tmp_path / "bin"
+            log_path = tmp_path / "commands.jsonl"
+            payload_path = tmp_path / "bootstrap.tar"
+            bin_dir.mkdir()
+            self.write_fake_command(bin_dir, "systemctl", log_path)
+            self.write_fake_rsync(bin_dir, log_path)
+            self.write_fake_ssh_capturing_stdin(bin_dir, log_path, payload_path)
+            config = tmp_path / "upload.env"
+            config.write_text(
+                "\n".join(self.upload_config_lines(node_home, staging, [
+                    "BUILDER_SSH_PORT=2222",
+                    "SSH_OPTIONS=\"-o BatchMode=yes\"",
+                    "REMOTE_COMMAND=\"cosmos-snapshot-remote\"",
+                    "RUN_FINALIZER=1",
+                ]))
+            )
+
+            result = self.run_cmd([UPLOADER, "--config", config, "--bootstrap"], env={
+                **os.environ,
+                "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            })
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            entries = self.read_json_lines(log_path)
+            self.assertEqual(entries[0], ["systemctl", ["stop", "examplechaind.service"]])
+            self.assertEqual(entries[6], ["systemctl", ["start", "examplechaind.service"]])
+            self.assertIn("cosmos-snapshot-remote prepare --chain examplechain", entries[7][1][-1])
+            self.assertIn("cosmos-snapshot-remote bootstrap --chain examplechain", entries[8][1][-1])
+            self.assertGreater(entries[8][2], 0)
+            self.assertEqual(entries[9][0], "rsync")
+            self.assertIn("--dry-run", entries[9][1])
+            self.assertIn("--checksum", entries[9][1])
+            self.assertNotIn("--info=progress2", entries[9][1])
+            self.assertEqual(entries[9][1][-2], f"{staging}/")
+            self.assertIn("cosmos-snapshot-remote finalize --chain examplechain", entries[10][1][-1])
+            self.assertTrue((staging / "application.db" / "CURRENT").exists())
+            self.assertFalse((staging / "priv_validator_state.json").exists())
+            self.assertFalse((staging / "snapshots").exists())
+            with tarfile.open(payload_path, "r:") as archive:
+                names = set(archive.getnames())
+            self.assertIn("./application.db/CURRENT", names)
+            self.assertIn("./blockstore.db/CURRENT", names)
+            self.assertIn("./state.db/CURRENT", names)
+            self.assertNotIn("./priv_validator_state.json", names)
+            self.assertFalse(any("snapshots" in name for name in names))
+
+    def test_upload_bootstrap_config_streams_staged_archive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            node_home = self.make_source_node_home(tmp_path)
+            staging = tmp_path / "staging-data"
+            bin_dir = tmp_path / "bin"
+            log_path = tmp_path / "commands.jsonl"
+            bin_dir.mkdir()
+            self.write_fake_command(bin_dir, "systemctl", log_path)
+            self.write_fake_rsync(bin_dir, log_path)
+            self.write_fake_ssh_receiving_stdin(bin_dir, log_path)
+            config = tmp_path / "upload.env"
+            config.write_text(
+                "\n".join(self.upload_config_lines(node_home, staging, [
+                    "REMOTE_COMMAND=\"cosmos-snapshot-remote\"",
+                    "BOOTSTRAP_UPLOAD=1",
+                    "RUN_FINALIZER=0",
+                ]))
+            )
+
+            result = self.run_cmd([UPLOADER, "--config", config], env={
+                **os.environ,
+                "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            })
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            entries = self.read_json_lines(log_path)
+            self.assertIn("cosmos-snapshot-remote bootstrap --chain examplechain", entries[8][1][-1])
+            self.assertGreater(entries[8][2], 0)
+            self.assertFalse(any(entry[0] == "ssh" and "finalize" in entry[1][-1] for entry in entries))
+
+    def test_upload_does_not_finalize_after_rsync_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            node_home = self.make_source_node_home(tmp_path)
+            staging = tmp_path / "staging-data"
+            bin_dir = tmp_path / "bin"
+            log_path = tmp_path / "commands.jsonl"
+            bin_dir.mkdir()
+            self.write_fake_command(bin_dir, "ssh", log_path)
+            self.write_fake_command(bin_dir, "systemctl", log_path)
+            self.write_fake_rsync(bin_dir, log_path)
+            config = tmp_path / "upload.env"
+            config.write_text(
+                "\n".join(self.upload_config_lines(node_home, staging, [
                     "REMOTE_COMMAND=\"cosmos-snapshot-remote\"",
                     "VERIFY_REMOTE_RSYNC=0",
                     "RUN_FINALIZER=1",
-                ])
+                ]))
             )
 
             result = self.run_cmd([UPLOADER, "--config", config], env={
@@ -414,7 +970,8 @@ class SnapshotToolTests(unittest.TestCase):
     def test_upload_restarts_service_when_validation_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            data = tmp_path / "live-data"
+            node_home = tmp_path / "node-home"
+            data = node_home / "data"
             (data / "application.db").mkdir(parents=True)
             (data / "application.db" / "CURRENT").write_text("db-current")
             staging = tmp_path / "staging-data"
@@ -426,13 +983,7 @@ class SnapshotToolTests(unittest.TestCase):
             self.write_fake_command(bin_dir, "ssh", log_path)
             config = tmp_path / "upload.env"
             config.write_text(
-                "\n".join([
-                    "CHAIN=\"examplechain\"",
-                    f"DATA_PATH=\"{data}\"",
-                    f"STAGING_PATH=\"{staging}\"",
-                    "SERVICE_NAME=\"examplechaind.service\"",
-                    "BUILDER_SSH=\"snapupload@snapshot-builder.example\"",
-                ])
+                "\n".join(self.upload_config_lines(node_home, staging))
             )
 
             result = self.run_cmd([UPLOADER, "--config", config], env={
@@ -451,7 +1002,7 @@ class SnapshotToolTests(unittest.TestCase):
     def test_upload_refuses_to_stage_non_database_directories(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            source = self.make_source_data(tmp_path)
+            node_home = self.make_source_node_home(tmp_path)
             staging = tmp_path / "staging-data"
             bin_dir = tmp_path / "bin"
             log_path = tmp_path / "commands.jsonl"
@@ -461,14 +1012,9 @@ class SnapshotToolTests(unittest.TestCase):
             self.write_fake_command(bin_dir, "ssh", log_path)
             config = tmp_path / "upload.env"
             config.write_text(
-                "\n".join([
-                    "CHAIN=\"examplechain\"",
-                    f"DATA_PATH=\"{source}\"",
-                    f"STAGING_PATH=\"{staging}\"",
-                    "SERVICE_NAME=\"examplechaind.service\"",
-                    "BUILDER_SSH=\"snapupload@snapshot-builder.example\"",
+                "\n".join(self.upload_config_lines(node_home, staging, [
                     "STAGE_DB_DIRS=\"application.db snapshots\"",
-                ])
+                ]))
             )
 
             result = self.run_cmd([UPLOADER, "--config", config], env={
@@ -488,7 +1034,7 @@ class SnapshotToolTests(unittest.TestCase):
     def test_upload_remote_verification_failure_prevents_finalize(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            source = self.make_source_data(tmp_path)
+            node_home = self.make_source_node_home(tmp_path)
             staging = tmp_path / "staging-data"
             bin_dir = tmp_path / "bin"
             log_path = tmp_path / "commands.jsonl"
@@ -498,16 +1044,11 @@ class SnapshotToolTests(unittest.TestCase):
             self.write_fake_rsync(bin_dir, log_path)
             config = tmp_path / "upload.env"
             config.write_text(
-                "\n".join([
-                    "CHAIN=\"examplechain\"",
-                    f"DATA_PATH=\"{source}\"",
-                    f"STAGING_PATH=\"{staging}\"",
-                    "SERVICE_NAME=\"examplechaind.service\"",
-                    "BUILDER_SSH=\"snapupload@snapshot-builder.example\"",
+                "\n".join(self.upload_config_lines(node_home, staging, [
                     "REMOTE_COMMAND=\"cosmos-snapshot-remote\"",
                     "VERIFY_REMOTE_RSYNC=1",
                     "RUN_FINALIZER=1",
-                ])
+                ]))
             )
 
             result = self.run_cmd([UPLOADER, "--config", config], env={
@@ -520,6 +1061,8 @@ class SnapshotToolTests(unittest.TestCase):
             self.assertIn("remote rsync verification found pending changes", result.stderr)
             entries = self.read_json_lines(log_path)
             self.assertIn("--dry-run", entries[-1][1])
+            self.assertIn("--checksum", entries[-1][1])
+            self.assertNotIn("--info=progress2", entries[-1][1])
             self.assertFalse(any(entry[0] == "ssh" and "finalize" in entry[1][-1] for entry in entries))
 
     def test_finalizer_rejects_non_tendermint_tree(self):
@@ -824,6 +1367,7 @@ class SnapshotToolTests(unittest.TestCase):
 
             cases = [
                 ["rsync", "--chain", "otherchain", "--client-id", "example-source", "--server", ".", str(ingest / "otherchain" / "data")],
+                ["bootstrap", "--chain", "otherchain", "--client-id", "example-source"],
                 ["finalize", "--chain", "otherchain", "--client-id", "example-source"],
                 ["status", "--chain", "otherchain", "--client-id", "example-source"],
             ]
@@ -885,6 +1429,9 @@ class SnapshotToolTests(unittest.TestCase):
                     "ALLOW_CLIENT_ID_ARG=1",
                 ])
             )
+            marker = ingest / "examplechain" / ".transfer-in-progress"
+            marker.parent.mkdir(parents=True)
+            marker.write_text("")
 
             result = self.run_cmd([
                 REMOTE,
@@ -902,6 +1449,38 @@ class SnapshotToolTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(log_path.read_text()), ["--server", ".", str(ingest / "examplechain" / "data")])
+
+    def test_remote_rsync_requires_prepare_marker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            access = tmp_path / "access.json"
+            remote_config = tmp_path / "remote.env"
+            ingest = tmp_path / "ingest"
+            access.write_text(json.dumps({"clients": {"example-source": {"chains": ["examplechain"]}}}))
+            remote_config.write_text(
+                "\n".join([
+                    f"INGEST_ROOT=\"{ingest}\"",
+                    f"ACCESS_CONFIG=\"{access}\"",
+                    "ALLOW_CLIENT_ID_ARG=1",
+                ])
+            )
+
+            result = self.run_cmd([
+                REMOTE,
+                "--config",
+                remote_config,
+                "rsync",
+                "--chain",
+                "examplechain",
+                "--client-id",
+                "example-source",
+                "--server",
+                ".",
+                str(tmp_path / "outside"),
+            ])
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("missing transfer marker", result.stderr)
 
     def test_remote_wrapper_allows_rsync_under_chain_data_path(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -931,6 +1510,7 @@ class SnapshotToolTests(unittest.TestCase):
 
             destination = ingest / "examplechain" / "data"
             destination.mkdir(parents=True)
+            (ingest / "examplechain" / ".transfer-in-progress").write_text("")
             result = self.run_cmd([
                 REMOTE,
                 "--config",
@@ -948,6 +1528,291 @@ class SnapshotToolTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(log_path.read_text()), ["--server", "--sender", ".", str(destination)])
+
+    def test_remote_rejects_data_symlink_escape_for_rsync(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            access = tmp_path / "access.json"
+            remote_config = tmp_path / "remote.env"
+            ingest = tmp_path / "ingest"
+            outside = tmp_path / "outside-data"
+            outside.mkdir()
+            chain_root = ingest / "examplechain"
+            chain_root.mkdir(parents=True)
+            (chain_root / "data").symlink_to(outside, target_is_directory=True)
+            (chain_root / ".transfer-in-progress").write_text("")
+            access.write_text(json.dumps({"clients": {"example-source": {"chains": ["examplechain"]}}}))
+            remote_config.write_text(
+                "\n".join([
+                    f"INGEST_ROOT=\"{ingest}\"",
+                    f"ACCESS_CONFIG=\"{access}\"",
+                    "ALLOW_CLIENT_ID_ARG=1",
+                ])
+            )
+
+            result = self.run_cmd([
+                REMOTE,
+                "--config",
+                remote_config,
+                "rsync",
+                "--chain",
+                "examplechain",
+                "--client-id",
+                "example-source",
+                "--server",
+                ".",
+                str(tmp_path / "outside"),
+            ])
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("data path must not be a symlink", result.stderr)
+
+    def test_remote_rejects_data_symlink_escape_for_bootstrap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            access = tmp_path / "access.json"
+            remote_config = tmp_path / "remote.env"
+            ingest = tmp_path / "ingest"
+            outside = tmp_path / "outside-data"
+            outside.mkdir()
+            chain_root = ingest / "examplechain"
+            chain_root.mkdir(parents=True)
+            (chain_root / "data").symlink_to(outside, target_is_directory=True)
+            (chain_root / ".transfer-in-progress").write_text("")
+            access.write_text(json.dumps({"clients": {"example-source": {"chains": ["examplechain"]}}}))
+            remote_config.write_text(
+                "\n".join([
+                    f"INGEST_ROOT=\"{ingest}\"",
+                    f"ACCESS_CONFIG=\"{access}\"",
+                    "ALLOW_CLIENT_ID_ARG=1",
+                ])
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(REMOTE),
+                    "--config",
+                    str(remote_config),
+                    "bootstrap",
+                    "--chain",
+                    "examplechain",
+                    "--client-id",
+                    "example-source",
+                ],
+                input=b"",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("data path must not be a symlink", result.stderr.decode())
+
+    def test_remote_bootstrap_requires_prepare_marker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            access = tmp_path / "access.json"
+            remote_config = tmp_path / "remote.env"
+            ingest = tmp_path / "ingest"
+            archive_buffer = io.BytesIO()
+            with tarfile.open(fileobj=archive_buffer, mode="w") as tar:
+                member = tarfile.TarInfo("application.db/CURRENT")
+                payload = b"db-current"
+                member.size = len(payload)
+                tar.addfile(member, io.BytesIO(payload))
+            access.write_text(json.dumps({"clients": {"example-source": {"chains": ["examplechain"]}}}))
+            remote_config.write_text(
+                "\n".join([
+                    f"INGEST_ROOT=\"{ingest}\"",
+                    f"ACCESS_CONFIG=\"{access}\"",
+                    "ALLOW_CLIENT_ID_ARG=1",
+                ])
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(REMOTE),
+                    "--config",
+                    str(remote_config),
+                    "bootstrap",
+                    "--chain",
+                    "examplechain",
+                    "--client-id",
+                    "example-source",
+                ],
+                input=archive_buffer.getvalue(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("missing transfer marker", result.stderr.decode())
+            self.assertFalse((ingest / "examplechain" / "data").exists())
+
+    def test_remote_bootstrap_extracts_archive_to_configured_ingest_data_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            access = tmp_path / "access.json"
+            remote_config = tmp_path / "remote.env"
+            ingest = tmp_path / "ingest"
+            archive = tmp_path / "bootstrap.tar"
+            source = tmp_path / "source"
+            for db_dir in ["application.db", "blockstore.db", "state.db"]:
+                (source / db_dir).mkdir(parents=True)
+                (source / db_dir / "CURRENT").write_text(f"{db_dir}-current")
+            with tarfile.open(archive, "w") as tar:
+                tar.add(source, arcname=".")
+            access.write_text(json.dumps({"clients": {"example-source": {"chains": ["examplechain"]}}}))
+            remote_config.write_text(
+                "\n".join([
+                    f"INGEST_ROOT=\"{ingest}\"",
+                    f"ACCESS_CONFIG=\"{access}\"",
+                    "ALLOW_CLIENT_ID_ARG=1",
+                ])
+            )
+            stale = ingest / "examplechain" / "data" / "stale.db"
+            stale.mkdir(parents=True)
+            (stale / "CURRENT").write_text("old")
+            marker = ingest / "examplechain" / ".transfer-in-progress"
+            marker.write_text("")
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(REMOTE),
+                    "--config",
+                    str(remote_config),
+                    "bootstrap",
+                    "--chain",
+                    "examplechain",
+                    "--client-id",
+                    "example-source",
+                ],
+                input=archive.read_bytes(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+            data = ingest / "examplechain" / "data"
+            self.assertTrue((data / "application.db" / "CURRENT").exists())
+            self.assertTrue((data / "blockstore.db" / "CURRENT").exists())
+            self.assertTrue((data / "state.db" / "CURRENT").exists())
+            self.assertFalse(stale.exists())
+            self.assertTrue(marker.exists())
+
+    def test_remote_bootstrap_rejects_unsafe_archive_members(self):
+        cases = [
+            ("parent escape", "../escape.txt", tarfile.REGTYPE, "", "escapes data root"),
+            ("absolute path", "/escape.txt", tarfile.REGTYPE, "", "escapes data root"),
+            ("symlink", "link", tarfile.SYMTYPE, "/etc/passwd", "member type is not allowed"),
+            ("hardlink", "hardlink", tarfile.LNKTYPE, "application.db/CURRENT", "member type is not allowed"),
+        ]
+        for name, member_name, member_type, linkname, expected_error in cases:
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as tmp:
+                    tmp_path = Path(tmp)
+                    access = tmp_path / "access.json"
+                    remote_config = tmp_path / "remote.env"
+                    ingest = tmp_path / "ingest"
+                    archive_buffer = io.BytesIO()
+                    with tarfile.open(fileobj=archive_buffer, mode="w") as tar:
+                        member = tarfile.TarInfo(member_name)
+                        member.type = member_type
+                        if member_type == tarfile.REGTYPE:
+                            payload = b"escape"
+                            member.size = len(payload)
+                            tar.addfile(member, io.BytesIO(payload))
+                        else:
+                            member.linkname = linkname
+                            tar.addfile(member)
+                    access.write_text(json.dumps({"clients": {"example-source": {"chains": ["examplechain"]}}}))
+                    remote_config.write_text(
+                        "\n".join([
+                            f"INGEST_ROOT=\"{ingest}\"",
+                            f"ACCESS_CONFIG=\"{access}\"",
+                            "ALLOW_CLIENT_ID_ARG=1",
+                        ])
+                    )
+                    marker = ingest / "examplechain" / ".transfer-in-progress"
+                    marker.parent.mkdir(parents=True)
+                    marker.write_text("")
+
+                    result = subprocess.run(
+                        [
+                            sys.executable,
+                            str(REMOTE),
+                            "--config",
+                            str(remote_config),
+                            "bootstrap",
+                            "--chain",
+                            "examplechain",
+                            "--client-id",
+                            "example-source",
+                        ],
+                        input=archive_buffer.getvalue(),
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                    )
+
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(expected_error, result.stderr.decode())
+                    self.assertFalse((ingest / "escape.txt").exists())
+                    self.assertFalse((ingest / "examplechain" / "data").exists())
+
+    def test_remote_bootstrap_failed_extraction_preserves_existing_data_and_cleans_temp(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            access = tmp_path / "access.json"
+            remote_config = tmp_path / "remote.env"
+            ingest = tmp_path / "ingest"
+            archive_buffer = io.BytesIO()
+            with tarfile.open(fileobj=archive_buffer, mode="w") as tar:
+                safe = tarfile.TarInfo("application.db/CURRENT")
+                safe_payload = b"new"
+                safe.size = len(safe_payload)
+                tar.addfile(safe, io.BytesIO(safe_payload))
+                unsafe = tarfile.TarInfo("../escape.txt")
+                unsafe_payload = b"escape"
+                unsafe.size = len(unsafe_payload)
+                tar.addfile(unsafe, io.BytesIO(unsafe_payload))
+            chain_root = ingest / "examplechain"
+            existing = chain_root / "data" / "application.db"
+            existing.mkdir(parents=True)
+            (existing / "CURRENT").write_text("old")
+            (chain_root / ".transfer-in-progress").write_text("")
+            access.write_text(json.dumps({"clients": {"example-source": {"chains": ["examplechain"]}}}))
+            remote_config.write_text(
+                "\n".join([
+                    f"INGEST_ROOT=\"{ingest}\"",
+                    f"ACCESS_CONFIG=\"{access}\"",
+                    "ALLOW_CLIENT_ID_ARG=1",
+                ])
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(REMOTE),
+                    "--config",
+                    str(remote_config),
+                    "bootstrap",
+                    "--chain",
+                    "examplechain",
+                    "--client-id",
+                    "example-source",
+                ],
+                input=archive_buffer.getvalue(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("escapes data root", result.stderr.decode())
+            self.assertEqual((existing / "CURRENT").read_text(), "old")
+            self.assertFalse((chain_root / ".bootstrap-data.tmp").exists())
+            self.assertFalse((ingest / "escape.txt").exists())
 
     def test_remote_finalize_removes_marker_and_invokes_finalizer(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -990,6 +1855,42 @@ class SnapshotToolTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse(marker.exists())
             self.assertEqual(json.loads(finalizer_log.read_text()), ["--config", "/tmp/finalizer.env", "--chain", "examplechain"])
+
+    def test_remote_finalize_restores_marker_when_finalizer_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            access = tmp_path / "access.json"
+            remote_config = tmp_path / "remote.env"
+            ingest = tmp_path / "ingest"
+            failing_finalizer = tmp_path / "failing-finalizer"
+            failing_finalizer.write_text("#!/bin/sh\nexit 42\n")
+            failing_finalizer.chmod(failing_finalizer.stat().st_mode | stat.S_IXUSR)
+            access.write_text(json.dumps({"clients": {"example-source": {"chains": ["examplechain"]}}}))
+            remote_config.write_text(
+                "\n".join([
+                    f"INGEST_ROOT=\"{ingest}\"",
+                    f"ACCESS_CONFIG=\"{access}\"",
+                    f"FINALIZER_COMMAND=\"{failing_finalizer}\"",
+                    "ALLOW_CLIENT_ID_ARG=1",
+                ])
+            )
+            marker = ingest / "examplechain" / ".transfer-in-progress"
+            marker.parent.mkdir(parents=True)
+            marker.write_text("")
+
+            result = self.run_cmd([
+                REMOTE,
+                "--config",
+                remote_config,
+                "finalize",
+                "--chain",
+                "examplechain",
+                "--client-id",
+                "example-source",
+            ])
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertTrue(marker.exists())
 
     def test_remote_finalize_ignores_ambient_finalizer_command_override(self):
         with tempfile.TemporaryDirectory() as tmp:

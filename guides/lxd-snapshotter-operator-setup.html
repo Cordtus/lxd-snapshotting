@@ -1,0 +1,2047 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LXD Snapshotter Operator Setup</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2316734f'/%3E%3Cpath d='M8 10h16v4H8zm0 8h16v4H8z' fill='white'/%3E%3C/svg%3E">
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f8f8f3;
+      --ink: #1d211c;
+      --muted: #626a60;
+      --line: #d7dbd1;
+      --panel: #ffffff;
+      --panel-soft: #f1f4ee;
+      --accent: #16734f;
+      --accent-strong: #0f563a;
+      --warn: #9a5a00;
+      --danger: #a23c3c;
+      --code: #161b18;
+      --code-ink: #ecf2ea;
+      --focus: #7a5cff;
+      --shadow: 0 18px 54px rgba(30, 35, 28, 0.12);
+      --nav-width: 286px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.5;
+      letter-spacing: 0;
+    }
+
+    button,
+    input {
+      font: inherit;
+      letter-spacing: 0;
+    }
+
+    a {
+      color: inherit;
+    }
+
+    .shell {
+      min-height: 100vh;
+      display: grid;
+      grid-template-columns: var(--nav-width) minmax(0, 1fr);
+    }
+
+    .rail {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      padding: 22px 18px;
+      border-right: 1px solid var(--line);
+      background: rgba(248, 248, 243, 0.94);
+      backdrop-filter: blur(12px);
+      overflow-y: auto;
+    }
+
+    .brand {
+      display: grid;
+      gap: 6px;
+      margin-bottom: 24px;
+    }
+
+    .brand strong {
+      font-size: 18px;
+      line-height: 1.2;
+    }
+
+    .brand span {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .progress-wrap {
+      display: grid;
+      gap: 8px;
+      margin: 18px 0 24px;
+    }
+
+    .progress-copy {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .progress-track {
+      height: 8px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: #e3e7df;
+    }
+
+    .progress-fill {
+      width: 0%;
+      height: 100%;
+      border-radius: inherit;
+      background: var(--accent);
+      transition: width 220ms ease;
+    }
+
+    .nav {
+      display: grid;
+      gap: 5px;
+    }
+
+    .nav a {
+      display: block;
+      border-radius: 6px;
+      padding: 8px 9px;
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 13px;
+    }
+
+    .nav a:hover,
+    .nav a.active {
+      background: var(--panel-soft);
+      color: var(--ink);
+    }
+
+    main {
+      min-width: 0;
+      padding: 0 0 80px;
+    }
+
+    .hero {
+      min-height: 84vh;
+      display: grid;
+      align-items: center;
+      padding: 52px clamp(22px, 5vw, 72px);
+      border-bottom: 1px solid var(--line);
+      background:
+        linear-gradient(120deg, rgba(248, 248, 243, 0.92) 0%, rgba(248, 248, 243, 0.72) 54%, rgba(232, 238, 230, 0.86) 100%),
+        repeating-linear-gradient(0deg, rgba(29, 33, 28, 0.045) 0, rgba(29, 33, 28, 0.045) 1px, transparent 1px, transparent 42px),
+        repeating-linear-gradient(90deg, rgba(29, 33, 28, 0.04) 0, rgba(29, 33, 28, 0.04) 1px, transparent 1px, transparent 42px);
+    }
+
+    .hero-grid {
+      display: grid;
+      grid-template-columns: minmax(440px, 0.9fr) minmax(320px, 0.8fr);
+      gap: 36px;
+      align-items: center;
+    }
+
+    .kicker {
+      margin: 0 0 12px;
+      color: var(--accent-strong);
+      font-size: 13px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      max-width: 760px;
+      margin: 0;
+      font-size: 56px;
+      line-height: 0.98;
+      letter-spacing: 0;
+    }
+
+    .hero p {
+      max-width: 620px;
+      margin: 22px 0 0;
+      color: var(--muted);
+      font-size: 19px;
+    }
+
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 28px;
+    }
+
+    .button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 42px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      color: var(--ink);
+      padding: 10px 14px;
+      text-decoration: none;
+      cursor: pointer;
+      font-weight: 700;
+      font-size: 14px;
+    }
+
+    .button.primary {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .button:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 8px 24px rgba(30, 35, 28, 0.12);
+    }
+
+    .runbook-divider {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(240px, 0.46fr);
+      gap: 24px;
+      align-items: end;
+      padding: 30px clamp(22px, 5vw, 72px);
+      border-bottom: 1px solid var(--line);
+      background: #eef3ea;
+    }
+
+    .runbook-divider.client {
+      background: #f4f0e8;
+    }
+
+    .runbook-divider.final {
+      background: #eef1f5;
+    }
+
+    .runbook-divider strong {
+      display: block;
+      color: var(--accent-strong);
+      font-size: 13px;
+      text-transform: uppercase;
+    }
+
+    .runbook-divider h2 {
+      margin-top: 6px;
+    }
+
+    .runbook-divider p {
+      margin: 8px 0 0;
+      color: var(--muted);
+      max-width: 760px;
+    }
+
+    .runbook-divider .mini-list {
+      margin: 0;
+      gap: 8px;
+    }
+
+    .topology {
+      min-height: 460px;
+      display: grid;
+      gap: 16px;
+      align-content: center;
+      padding: 18px;
+      border: 1px solid rgba(29, 33, 28, 0.16);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.74);
+      box-shadow: var(--shadow);
+    }
+
+    .topology-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 34px minmax(0, 1fr);
+      gap: 10px;
+      align-items: center;
+    }
+
+    .topology-node {
+      min-height: 92px;
+      display: grid;
+      gap: 5px;
+      align-content: center;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 14px;
+    }
+
+    .topology-node strong {
+      font-size: 15px;
+    }
+
+    .topology-node span {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .topology-node.green {
+      border-color: rgba(22, 115, 79, 0.42);
+      background: #f1faf5;
+    }
+
+    .topology-node.gold {
+      border-color: rgba(154, 90, 0, 0.34);
+      background: #fff8ea;
+    }
+
+    .topology-node.red {
+      border-color: rgba(162, 60, 60, 0.34);
+      background: #fff3f1;
+    }
+
+    .link {
+      display: grid;
+      place-items: center;
+      height: 34px;
+      color: var(--accent);
+      font-weight: 900;
+    }
+
+    .public-split {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    .notice {
+      border-left: 4px solid var(--accent);
+      background: var(--panel-soft);
+      padding: 12px 14px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .content {
+      min-width: 0;
+      display: grid;
+      gap: 0;
+    }
+
+    section {
+      min-width: 0;
+      scroll-margin-top: 20px;
+      padding: 46px clamp(22px, 5vw, 72px);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .section-head {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 18px;
+      align-items: start;
+      margin-bottom: 22px;
+    }
+
+    h2 {
+      margin: 0;
+      font-size: 36px;
+      line-height: 1.05;
+    }
+
+    .section-head p {
+      max-width: 760px;
+      margin: 10px 0 0;
+      color: var(--muted);
+      font-size: 16px;
+    }
+
+    .step-focus {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 1px;
+      margin: 0 0 20px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      background: var(--line);
+    }
+
+    .focus-item {
+      min-width: 0;
+      background: #fff;
+      padding: 13px 14px;
+    }
+
+    .focus-item span {
+      display: block;
+      margin-bottom: 4px;
+      color: var(--accent-strong);
+      font-size: 11px;
+      font-weight: 900;
+      text-transform: uppercase;
+    }
+
+    .focus-item strong {
+      display: block;
+      font-size: 15px;
+      line-height: 1.25;
+    }
+
+    .focus-item p {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .step-check {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 128px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .step-check input {
+      width: 18px;
+      height: 18px;
+      accent-color: var(--accent);
+    }
+
+    .panel {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      overflow: hidden;
+    }
+
+    .panel + .panel,
+    .command-block + .panel,
+    .grid + .panel {
+      margin-top: 16px;
+    }
+
+    .panel-body {
+      padding: 18px;
+    }
+
+    .grid {
+      display: grid;
+      gap: 14px;
+    }
+
+    .grid.two {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .grid.three {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    label.field {
+      display: grid;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    label.field span {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+
+    input[type="text"],
+    input[type="number"] {
+      width: 100%;
+      min-height: 42px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--ink);
+      padding: 9px 11px;
+      outline: none;
+    }
+
+    label.field.invalid input {
+      border-color: var(--danger);
+      background: #fff5f3;
+    }
+
+    .validation-message {
+      margin-top: 6px;
+      color: var(--danger);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    input:focus,
+    button:focus,
+    summary:focus,
+    a:focus {
+      outline: 3px solid rgba(122, 92, 255, 0.28);
+      outline-offset: 2px;
+    }
+
+    .command-block {
+      min-width: 0;
+      max-width: 100%;
+      margin: 16px 0 0;
+      border-radius: 8px;
+      overflow: hidden;
+      background: var(--code);
+    }
+
+    .command-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-height: 44px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+      padding: 9px 12px;
+      color: #c6d1c4;
+      font-size: 12px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+
+    .copy {
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      border-radius: 7px;
+      background: rgba(255, 255, 255, 0.08);
+      color: #fff;
+      padding: 7px 10px;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .copy:disabled {
+      cursor: not-allowed;
+      opacity: 0.48;
+    }
+
+    .command-block.invalid pre {
+      color: #ffd6d1;
+    }
+
+    pre {
+      margin: 0;
+      max-width: 100%;
+      max-height: 440px;
+      overflow: auto;
+      padding: 16px;
+      color: var(--code-ink);
+      font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      white-space: pre;
+    }
+
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    }
+
+    details {
+      border-top: 1px solid var(--line);
+      background: #fbfcf8;
+    }
+
+    details:first-child {
+      border-top: 0;
+    }
+
+    summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 18px;
+      cursor: pointer;
+      color: var(--ink);
+      font-weight: 800;
+    }
+
+    summary::before {
+      content: "More detail";
+      flex: 0 0 auto;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--panel);
+      color: var(--muted);
+      padding: 3px 8px;
+      font-size: 11px;
+      font-weight: 900;
+      text-transform: uppercase;
+    }
+
+    summary::after {
+      content: "+";
+      width: 26px;
+      height: 26px;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--line);
+      border-radius: 50%;
+      color: var(--muted);
+      flex: 0 0 auto;
+    }
+
+    details[open] summary::after {
+      content: "-";
+    }
+
+    .detail-body {
+      padding: 0 18px 18px;
+      color: var(--muted);
+    }
+
+    .detail-body p {
+      margin: 0 0 10px;
+    }
+
+    .detail-body ul,
+    .detail-body ol {
+      margin: 8px 0 0;
+      padding-left: 22px;
+    }
+
+    .detail-body li + li {
+      margin-top: 6px;
+    }
+
+    .callout {
+      margin-top: 16px;
+      border: 1px solid var(--line);
+      border-left: 4px solid var(--warn);
+      border-radius: 8px;
+      background: #fffaf0;
+      padding: 13px 14px;
+      color: #5f471e;
+    }
+
+    .callout.danger {
+      border-left-color: var(--danger);
+      background: #fff5f3;
+      color: #6d2f2f;
+    }
+
+    .callout.ok {
+      border-left-color: var(--accent);
+      background: #f2fbf6;
+      color: #285442;
+    }
+
+    .mini-list {
+      display: grid;
+      gap: 10px;
+      margin: 16px 0 0;
+    }
+
+    .mini-item {
+      display: grid;
+      grid-template-columns: 26px minmax(0, 1fr);
+      gap: 10px;
+      align-items: start;
+      color: var(--muted);
+    }
+
+    .mini-item strong {
+      color: var(--ink);
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 26px;
+      height: 26px;
+      border-radius: 50%;
+      background: var(--panel-soft);
+      color: var(--accent-strong);
+      font-size: 12px;
+      font-weight: 900;
+    }
+
+    .status-line {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 30px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--panel);
+      color: var(--muted);
+      padding: 5px 10px;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    .print-only {
+      display: none;
+    }
+
+    .mobile-menu {
+      display: none;
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      border-bottom: 1px solid var(--line);
+      background: rgba(248, 248, 243, 0.96);
+      backdrop-filter: blur(12px);
+      padding: 10px 14px;
+    }
+
+    .mobile-menu select {
+      width: 100%;
+      min-height: 40px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      color: var(--ink);
+      padding: 8px 10px;
+    }
+
+    @media (max-width: 1240px) {
+      .hero-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 980px) {
+      .shell {
+        display: block;
+      }
+
+      .rail {
+        display: none;
+      }
+
+      .mobile-menu {
+        display: block;
+      }
+
+      .hero {
+        min-height: auto;
+        padding-top: 38px;
+        scroll-margin-top: 124px;
+      }
+
+      .grid.two,
+      .grid.three {
+        grid-template-columns: 1fr;
+      }
+
+      section {
+        scroll-margin-top: 124px;
+      }
+
+      .topology {
+        min-height: auto;
+      }
+
+      .section-head {
+        grid-template-columns: 1fr;
+      }
+
+      .runbook-divider,
+      .step-focus {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 640px) {
+      h1 {
+        font-size: 42px;
+      }
+
+      h2 {
+        font-size: 29px;
+      }
+
+      .hero p {
+        font-size: 17px;
+      }
+
+      section {
+        padding: 34px 16px;
+      }
+
+      .hero {
+        padding: 30px 16px;
+      }
+
+      .topology-row,
+      .public-split {
+        grid-template-columns: 1fr;
+      }
+
+      .link {
+        transform: rotate(90deg);
+      }
+
+      .button,
+      .hero-actions {
+        width: 100%;
+      }
+
+      .step-check {
+        width: 100%;
+      }
+
+      .runbook-divider {
+        padding: 24px 16px;
+      }
+    }
+
+    @media print {
+      .rail,
+      .mobile-menu,
+      .hero-actions,
+      .copy,
+      .step-check {
+        display: none !important;
+      }
+
+      .shell {
+        display: block;
+      }
+
+      body {
+        background: #fff;
+      }
+
+      section,
+      .hero {
+        break-inside: avoid;
+        border-bottom: 1px solid #bbb;
+        padding: 24px 0;
+      }
+
+      .panel,
+      .topology,
+      .command-block {
+        box-shadow: none;
+      }
+
+      .print-only {
+        display: block;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="mobile-menu">
+    <select id="mobileJump" aria-label="Jump to setup section">
+      <option value="#overview">Overview</option>
+      <option value="#variables">Variables</option>
+      <option value="#storage">Storage</option>
+      <option value="#builder">Builder container</option>
+      <option value="#configs">Configs</option>
+      <option value="#ssh">SSH access</option>
+      <option value="#ftp">FTP container</option>
+      <option value="#source">User setup</option>
+      <option value="#user-upload">User upload</option>
+      <option value="#validate">Validation</option>
+      <option value="#operate">Operations</option>
+    </select>
+  </div>
+
+  <div class="shell">
+    <aside class="rail" aria-label="Setup navigation">
+      <div class="brand">
+        <strong>LXD Snapshotter</strong>
+        <span>Operator and user runbook.</span>
+      </div>
+
+      <div class="progress-wrap">
+        <div class="progress-copy">
+          <span>Progress</span>
+          <span id="progressText">0 of 10</span>
+        </div>
+        <div class="progress-track" aria-hidden="true">
+          <div class="progress-fill" id="progressFill"></div>
+        </div>
+      </div>
+
+      <nav class="nav" id="nav">
+        <a href="#overview">Overview</a>
+        <a href="#variables">Variables</a>
+        <a href="#storage">Storage</a>
+        <a href="#builder">Builder container</a>
+        <a href="#configs">Configs</a>
+        <a href="#ssh">SSH access</a>
+        <a href="#ftp">FTP container</a>
+        <a href="#source">User setup</a>
+        <a href="#user-upload">User upload</a>
+        <a href="#validate">Validation</a>
+        <a href="#operate">Operations</a>
+      </nav>
+    </aside>
+
+    <main>
+      <header class="hero" id="overview">
+        <div class="hero-grid">
+          <div>
+            <p class="kicker">Operator and user paths</p>
+            <h1>LXD Snapshotter Setup</h1>
+            <p>Build storage, forced SSH, read-only FTP, user staging, upload, and validation.</p>
+            <div class="hero-actions">
+              <a class="button primary" href="#variables">Start setup</a>
+              <a class="button" href="/">Index</a>
+              <button class="button" type="button" id="printPage">Print runbook</button>
+            </div>
+            <div class="status-line" aria-label="Core safety boundaries">
+              <span class="pill">External writes by forced SSH</span>
+              <span class="pill">User stages locally</span>
+              <span class="pill">Initial tar seed</span>
+              <span class="pill">FTP hides staging paths</span>
+              <span class="pill">One archive retained</span>
+            </div>
+          </div>
+
+          <div class="topology" aria-label="Storage and network topology">
+            <div class="topology-row">
+              <div class="topology-node gold">
+                <strong>Source node</strong>
+                <span>Stops service, stages DB dirs, uploads by tar or rsync.</span>
+              </div>
+              <div class="link">-&gt;</div>
+              <div class="topology-node green">
+                <strong>snap-builder</strong>
+                <span>SSH wrapper, finalizer, publisher.</span>
+              </div>
+            </div>
+            <div class="topology-row">
+              <div class="topology-node red">
+                <strong>/ingest</strong>
+                <span>Writable upload workspace. Not mounted in FTP.</span>
+              </div>
+              <div class="link">+</div>
+              <div class="topology-node green">
+                <strong>/snapshots</strong>
+                <span>Archives, checksums, manifests, latest links.</span>
+              </div>
+            </div>
+            <div class="public-split">
+              <div class="topology-node">
+                <strong>LXD storage volume</strong>
+                <span>Shared by LXD; no builder-to-FTP route.</span>
+              </div>
+              <div class="topology-node gold">
+                <strong>FTP serving container</strong>
+                <span>Read-only public output mount.</span>
+              </div>
+            </div>
+            <div class="notice">
+              Builder and FTP can use different LXC networks. LXD shares the volume.
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <div class="content">
+        <div class="runbook-divider" id="operator-runbook">
+          <div>
+            <strong>Server/operator runbook</strong>
+            <h2>Build the receiver first</h2>
+            <p>Create custom volumes in the existing ZFS-backed pool. Mount public output read-write in builder and read-only in FTP.</p>
+          </div>
+          <div class="mini-list" aria-label="Server runbook checkpoints">
+            <div class="mini-item"><span class="badge">1</span><div>Variables and storage</div></div>
+            <div class="mini-item"><span class="badge">2</span><div>Builder scripts and forced SSH</div></div>
+            <div class="mini-item"><span class="badge">3</span><div>Read-only FTP output</div></div>
+          </div>
+        </div>
+
+        <section id="variables" data-step="variables">
+          <div class="section-head">
+            <div>
+              <h2>1. Set variables</h2>
+              <p>Edit once. Commands update from these values.</p>
+            </div>
+            <label class="step-check"><input type="checkbox" data-complete="variables"> Done</label>
+          </div>
+
+          <div class="step-focus">
+            <div class="focus-item"><span>Hold point</span><strong>Replace placeholders.</strong><p>Invalid values disable copy buttons.</p></div>
+            <div class="focus-item"><span>Server</span><strong>LXD names and identity.</strong><p>Used for storage, wrapper config, and SSH auth.</p></div>
+            <div class="focus-item"><span>Client</span><strong>Node home and staging path.</strong><p>Users get upload details, not server paths.</p></div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-body">
+              <div class="grid three">
+                <label class="field">
+                  <span>Storage pool</span>
+                  <input type="text" data-var="POOL" value="default">
+                </label>
+                <label class="field">
+                  <span>Builder</span>
+                  <input type="text" data-var="BUILDER" value="snap-builder">
+                </label>
+                <label class="field">
+                  <span>FTP</span>
+                  <input type="text" data-var="FTP" value="ftp-public">
+                </label>
+                <label class="field">
+                  <span>Chain</span>
+                  <input type="text" data-var="CHAIN" value="examplechain">
+                </label>
+                <label class="field">
+                  <span>Client ID</span>
+                  <input type="text" data-var="CLIENT_ID" value="example-source">
+                </label>
+                <label class="field">
+                  <span>Upload user</span>
+                  <input type="text" data-var="UPLOAD_USER" value="snapupload">
+                </label>
+                <label class="field">
+                  <span>SSH port</span>
+                  <input type="number" data-var="SSH_PORT" value="2222">
+                </label>
+                <label class="field">
+                  <span>SSH bind</span>
+                  <input type="text" data-var="SSH_BIND_ADDR" value="vpn-bind-address">
+                </label>
+                <label class="field">
+                  <span>FTP mount</span>
+                  <input type="text" data-var="FTP_MOUNT" value="/srv/ftp/snapshots">
+                </label>
+                <label class="field">
+                  <span>Client builder host</span>
+                  <input type="text" data-var="BUILDER_HOST" value="snapshot-builder.vpn">
+                </label>
+                <label class="field">
+                  <span>Node home</span>
+                  <input type="text" data-var="USER_NODE_HOME" value="~/.genesisd">
+                </label>
+                <label class="field">
+                  <span>Data subdir</span>
+                  <input type="text" data-var="USER_DATA_SUBDIR" value="data">
+                </label>
+                <label class="field">
+                  <span>Service</span>
+                  <input type="text" data-var="USER_SERVICE_NAME" value="examplechain.service">
+                </label>
+                <label class="field">
+                  <span>Staging path</span>
+                  <input type="text" data-var="USER_STAGING_PATH" value="/var/tmp/examplechain-stage">
+                </label>
+                <label class="field">
+                  <span>Schedule</span>
+                  <input type="text" data-var="USER_UPLOAD_SCHEDULE" value="Mon,Thu *-*-* 03:15:00">
+                </label>
+                <label class="field">
+                  <span>systemctl</span>
+                  <input type="text" data-var="USER_SYSTEMCTL_COMMAND" value="systemctl">
+                </label>
+              </div>
+              <div id="validationIssues" class="callout danger hidden" role="alert"></div>
+            </div>
+            <details>
+              <summary>Variable map</summary>
+              <div class="detail-body">
+                <p><code>POOL</code>, <code>BUILDER</code>, and <code>FTP</code> are local LXD names. <code>CHAIN</code> is the ingest dir and archive prefix.</p>
+                <p><code>CLIENT_ID</code> must match forced-command SSH and access-control JSON.</p>
+                <p><code>SSH_BIND_ADDR</code> is the VPN/LAN bind address. Avoid <code>0.0.0.0</code> unless firewall policy is ready.</p>
+                <p><code>USER_*</code> values build source config only. They are not server config.</p>
+              </div>
+            </details>
+            <details>
+              <summary>Pre-flight host checks</summary>
+              <div class="detail-body">
+                <p>Run before creating devices if names are unconfirmed.</p>
+                <div class="command-block">
+                  <div class="command-head"><span>Host checks</span><button class="copy" type="button">Copy</button></div>
+                  <pre data-template>lxc storage list
+lxc list
+lxc config show "{BUILDER}" --expanded
+lxc config show "{FTP}" --expanded</pre>
+                </div>
+              </div>
+            </details>
+          </div>
+        </section>
+
+        <section id="storage" data-step="storage">
+          <div class="section-head">
+            <div>
+              <h2>2. Create shared storage</h2>
+              <p>Create custom volumes in the existing LXD pool. Builder gets public output read-write; FTP gets read-only.</p>
+            </div>
+            <label class="step-check"><input type="checkbox" data-complete="storage"> Done</label>
+          </div>
+
+          <div class="step-focus">
+            <div class="focus-item"><span>LXD pool</span><strong>Use existing ZFS-backed LXD storage.</strong><p>No host bind mount or manual <code>zfs create</code>.</p></div>
+            <div class="focus-item"><span>Public</span><strong>One volume, two mounts.</strong><p>Builder read-write; FTP read-only.</p></div>
+            <div class="focus-item"><span>Ingest</span><strong>Builder only.</strong><p>Keep partial transfers out of FTP.</p></div>
+          </div>
+
+          <div class="callout ok">
+            <code>cosmos-snapshot-public</code> is the shared LXD custom volume: <code>{BUILDER}:/snapshots</code> read-write, <code>{FTP}:{FTP_MOUNT}</code> read-only.
+          </div>
+
+          <div class="command-block">
+            <div class="command-head"><span>Confirm LXD storage pool</span><button class="copy" type="button">Copy</button></div>
+            <pre data-template>lxc storage list
+lxc storage show "{POOL}"</pre>
+          </div>
+
+          <div class="command-block">
+            <div class="command-head"><span>Create custom volumes</span><button class="copy" type="button">Copy</button></div>
+            <pre data-template># Private receiver workspace: builder only.
+lxc storage volume create "{POOL}" cosmos-snapshot-ingest
+
+# Shared public output: builder read-write, FTP read-only.
+lxc storage volume create "{POOL}" cosmos-snapshot-public</pre>
+          </div>
+
+          <div class="command-block">
+            <div class="command-head"><span>Attach builder volumes</span><button class="copy" type="button">Copy</button></div>
+            <pre data-template>lxc config device add "{BUILDER}" snapshot-ingest disk \
+  pool="{POOL}" \
+  source=cosmos-snapshot-ingest \
+  path=/ingest
+
+lxc config device add "{BUILDER}" snapshot-public-rw disk \
+  pool="{POOL}" \
+  source=cosmos-snapshot-public \
+  path=/snapshots</pre>
+          </div>
+
+          <div class="command-block">
+            <div class="command-head"><span>Attach FTP public volume read-only</span><button class="copy" type="button">Copy</button></div>
+            <pre data-template>lxc config device add "{FTP}" snapshot-public-ro disk \
+  pool="{POOL}" \
+  source=cosmos-snapshot-public \
+  path="{FTP_MOUNT}" \
+  readonly=true</pre>
+          </div>
+
+          <div class="panel">
+            <details>
+              <summary>Shared pieces</summary>
+              <div class="detail-body">
+                <p><code>cosmos-snapshot-public</code> is the shared LXD custom volume.</p>
+                <p>Builder mounts it at <code>/snapshots</code> read-write. FTP mounts it at <code>{FTP_MOUNT}</code> read-only.</p>
+                <p><code>cosmos-snapshot-ingest</code> is builder-only and holds partial uploads before publish.</p>
+              </div>
+            </details>
+            <details>
+              <summary>Separate FTP subnet</summary>
+              <div class="detail-body">
+                <p>The containers can use separate LXC network devices or subnets. Sharing is via LXD storage, not container networking.</p>
+                <p>Only two routes matter: source node to builder SSH, and FTP clients to FTP.</p>
+              </div>
+            </details>
+            <details>
+              <summary>Storage safety checks</summary>
+              <div class="detail-body">
+                <div class="command-block">
+                  <div class="command-head"><span>Confirm mounted paths</span><button class="copy" type="button">Copy</button></div>
+                  <pre data-template>lxc exec "{BUILDER}" -- findmnt /ingest
+lxc exec "{BUILDER}" -- findmnt /snapshots
+lxc exec "{FTP}" -- findmnt "{FTP_MOUNT}"
+lxc exec "{FTP}" -- sh -c 'touch "{FTP_MOUNT}/.write-test"'</pre>
+                </div>
+                <div class="callout danger">
+                  Write test should fail. If it succeeds, FTP is not read-only.
+                </div>
+              </div>
+            </details>
+          </div>
+        </section>
+
+        <section id="builder" data-step="builder">
+          <div class="section-head">
+            <div>
+              <h2>3. Prepare the builder container</h2>
+              <p>Install tools, create the upload user, and add server scripts.</p>
+            </div>
+            <label class="step-check"><input type="checkbox" data-complete="builder"> Done</label>
+          </div>
+
+          <div class="step-focus">
+            <div class="focus-item"><span>Tools</span><strong>Install runtime deps.</strong><p>Python, rsync, SSH, tar, zstd.</p></div>
+            <div class="focus-item"><span>Account</span><strong>Dedicated upload user.</strong><p>Writes only through wrapper/finalizer.</p></div>
+            <div class="focus-item"><span>Scripts</span><strong>Wrapper and finalizer.</strong><p>Authorize, validate, publish.</p></div>
+          </div>
+
+          <div class="command-block">
+            <div class="command-head"><span>Install dependencies</span><button class="copy" type="button">Copy</button></div>
+            <pre data-template>lxc exec "{BUILDER}" -- apt-get update
+lxc exec "{BUILDER}" -- apt-get install -y python3 rsync openssh-server tar zstd</pre>
+          </div>
+
+          <div class="command-block">
+            <div class="command-head"><span>Create upload user and dirs</span><button class="copy" type="button">Copy</button></div>
+            <pre data-template>lxc exec "{BUILDER}" -- sh -c 'getent group "{UPLOAD_USER}" &gt;/dev/null || groupadd --system "{UPLOAD_USER}"'
+lxc exec "{BUILDER}" -- sh -c 'id -u "{UPLOAD_USER}" &gt;/dev/null 2&gt;&amp;1 || useradd --system --create-home --home-dir "/var/lib/{UPLOAD_USER}" --shell /bin/sh --gid "{UPLOAD_USER}" "{UPLOAD_USER}"'
+lxc exec "{BUILDER}" -- install -d -o "{UPLOAD_USER}" -g "{UPLOAD_USER}" -m 0750 /ingest
+lxc exec "{BUILDER}" -- install -d -o "{UPLOAD_USER}" -g "{UPLOAD_USER}" -m 0755 /snapshots</pre>
+          </div>
+
+          <div class="command-block">
+            <div class="command-head"><span>Push scripts</span><button class="copy" type="button">Copy</button></div>
+            <pre data-template>lxc file push scripts/cosmos-snapshot-remote "{BUILDER}/usr/local/sbin/cosmos-snapshot-remote"
+lxc file push scripts/cosmos-snapshot-finalize "{BUILDER}/usr/local/sbin/cosmos-snapshot-finalize"
+lxc exec "{BUILDER}" -- chmod 0755 /usr/local/sbin/cosmos-snapshot-remote /usr/local/sbin/cosmos-snapshot-finalize</pre>
+          </div>
+
+          <div class="panel">
+            <details>
+            <summary>Why /bin/sh</summary>
+              <div class="detail-body">
+                <p>OpenSSH forced commands need a valid shell. Confinement comes from <code>authorized_keys</code>, not <code>nologin</code>.</p>
+              </div>
+            </details>
+            <details>
+            <summary>Script behavior</summary>
+              <div class="detail-body">
+                <ul>
+                  <li><code>cosmos-snapshot-remote</code> authorizes prepare, rsync, bootstrap, status, and finalize.</li>
+                  <li>The wrapper maps rsync/bootstrap data to <code>/ingest/&lt;chain&gt;/data</code>.</li>
+                  <li>The finalizer refuses partial-transfer markers.</li>
+                  <li>The finalizer keeps one completed archive per chain.</li>
+                </ul>
+              </div>
+            </details>
+          </div>
+        </section>
+
+        <section id="configs" data-step="configs">
+          <div class="section-head">
+            <div>
+              <h2>4. Install server-side configs</h2>
+              <p>Builder config owns server paths. Client config must not contain <code>/ingest</code> or <code>/snapshots</code>.</p>
+            </div>
+            <label class="step-check"><input type="checkbox" data-complete="configs"> Done</label>
+          </div>
+
+          <div class="step-focus">
+            <div class="focus-item"><span>Wrapper</span><strong>Controls ops and ingest root.</strong><p>Clients cannot choose paths.</p></div>
+            <div class="focus-item"><span>Finalizer</span><strong>Packages validated ingest.</strong><p>Archive and checksum first; publish after.</p></div>
+            <div class="focus-item"><span>Allowlist</span><strong>Client id maps to chain.</strong><p>Every remote request is checked.</p></div>
+          </div>
+
+          <div class="command-block">
+            <div class="command-head"><span>/etc/cosmos-snapshot-remote.env</span><button class="copy" type="button">Copy</button></div>
+            <pre data-template>INGEST_ROOT="/ingest"
+ACCESS_CONFIG="/etc/cosmos-snapshot-access.json"
+RSYNC_COMMAND="rsync"
+FINALIZER_COMMAND="/usr/local/sbin/cosmos-snapshot-finalize --config /etc/cosmos-snapshot-finalizer.env"
+ALLOW_CLIENT_ID_ARG=0</pre>
+          </div>
+
+          <div class="command-block">
+            <div class="command-head"><span>/etc/cosmos-snapshot-finalizer.env</span><button class="copy" type="button">Copy</button></div>
+            <pre data-template>CHAIN="{CHAIN}"
+INGEST_ROOT="/ingest"
+SOURCE_SUBDIR="data"
+PUBLIC_ROOT="/snapshots"
+COMPRESSION="zstd"
+ZSTD_LEVEL=8
+
+HEIGHT=""
+APP_VERSION=""
+PRUNING=""
+
+VALIDATION_DATA_SUBDIR="."
+REQUIRED_DB_DIRS="application.db blockstore.db state.db"
+DB_MARKER_PATTERNS="CURRENT MANIFEST-* *.sst *.ldb"
+PARTIAL_MARKERS=".transfer-in-progress .rsync-partial .uploading .incomplete"
+EXTRA_EXCLUDES=""
+DRY_RUN=0</pre>
+          </div>
+
+          <div class="command-block">
+            <div class="command-head"><span>/etc/cosmos-snapshot-access.json</span><button class="copy" type="button">Copy</button></div>
+            <pre data-template>{
+  "clients": {
+    "{CLIENT_ID}": {
+      "chains": ["{CHAIN}"]
+    }
+  }
+}</pre>
+          </div>
+
+          <div class="panel">
+            <details>
+              <summary>Place config files</summary>
+              <div class="detail-body">
+                <p>Create them inside builder or push local copies with <code>lxc file push</code>.</p>
+                <div class="command-block">
+                  <div class="command-head"><span>Permissions after writing configs</span><button class="copy" type="button">Copy</button></div>
+                  <pre data-template>lxc exec "{BUILDER}" -- chown root:root /etc/cosmos-snapshot-remote.env /etc/cosmos-snapshot-finalizer.env /etc/cosmos-snapshot-access.json
+lxc exec "{BUILDER}" -- chmod 0644 /etc/cosmos-snapshot-remote.env /etc/cosmos-snapshot-finalizer.env /etc/cosmos-snapshot-access.json</pre>
+                </div>
+              </div>
+            </details>
+            <details>
+              <summary>Config boundaries</summary>
+              <div class="detail-body">
+                <p><code>ALLOW_CLIENT_ID_ARG=0</code> means identity comes from forced SSH. Do not ask users to pass <code>--client-id</code>.</p>
+                <p><code>SOURCE_SUBDIR=data</code> matches the wrapper destination: <code>/ingest/&lt;chain&gt;/data</code>.</p>
+              </div>
+            </details>
+          </div>
+        </section>
+
+        <section id="ssh" data-step="ssh">
+          <div class="section-head">
+            <div>
+              <h2>5. Force SSH through the wrapper</h2>
+              <p>External writes use rsync over SSH. The key must run only the remote wrapper.</p>
+            </div>
+            <label class="step-check"><input type="checkbox" data-complete="ssh"> Done</label>
+          </div>
+
+          <div class="step-focus">
+            <div class="focus-item"><span>Identity</span><strong>Forced command sets client id.</strong><p>Do not trust client-supplied ids.</p></div>
+            <div class="focus-item"><span>Confinement</span><strong>No shell, ports, agent, X11, or TTY.</strong><p>The key runs only the wrapper.</p></div>
+            <div class="focus-item"><span>Network</span><strong>Bind SSH to VPN/LAN.</strong><p>The router VPN is the public entry point.</p></div>
+          </div>
+
+          <div class="command-block">
+            <div class="command-head"><span>Prepare authorized_keys</span><button class="copy" type="button">Copy</button></div>
+            <pre data-template>lxc exec "{BUILDER}" -- install -d -o "{UPLOAD_USER}" -g "{UPLOAD_USER}" -m 0700 "/var/lib/{UPLOAD_USER}/.ssh"
+lxc exec "{BUILDER}" -- touch "/var/lib/{UPLOAD_USER}/.ssh/authorized_keys"
+lxc exec "{BUILDER}" -- chown "{UPLOAD_USER}:{UPLOAD_USER}" "/var/lib/{UPLOAD_USER}/.ssh/authorized_keys"
+lxc exec "{BUILDER}" -- chmod 0600 "/var/lib/{UPLOAD_USER}/.ssh/authorized_keys"</pre>
+          </div>
+
+          <div class="command-block">
+            <div class="command-head"><span>Authorized key line shape</span><button class="copy" type="button">Copy</button></div>
+            <pre data-template>command="/usr/bin/env COSMOS_SNAPSHOT_CLIENT_ID={CLIENT_ID} /usr/local/sbin/cosmos-snapshot-remote --config /etc/cosmos-snapshot-remote.env",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty ssh-ed25519 AAAA_REPLACE_WITH_CLIENT_PUBLIC_KEY {CLIENT_ID}</pre>
+          </div>
+
+          <div class="command-block">
+            <div class="command-head"><span>Expose SSH if needed</span><button class="copy" type="button">Copy</button></div>
+            <pre data-template>lxc config device add "{BUILDER}" snapshot-ssh proxy \
+  listen=tcp:{SSH_BIND_ADDR}:{SSH_PORT} \
+  connect=tcp:127.0.0.1:22</pre>
+          </div>
+
+          <div class="panel">
+            <details>
+              <summary>Forced-command scope</summary>
+              <div class="detail-body">
+                <p>The source operator can request <code>prepare</code>, <code>rsync</code>, <code>bootstrap</code>, <code>status</code>, or <code>finalize</code>. No shell, port forwarding, TTY, arbitrary paths, or unlisted chains.</p>
+                <p>Bind the proxy to the VPN/LAN address. The router VPN is the outside entry point.</p>
+              </div>
+            </details>
+            <details>
+              <summary>SSH daemon checks</summary>
+              <div class="detail-body">
+                <div class="command-block">
+                  <div class="command-head"><span>Inside builder</span><button class="copy" type="button">Copy</button></div>
+                  <pre data-template>lxc exec "{BUILDER}" -- systemctl enable --now ssh
+lxc exec "{BUILDER}" -- systemctl status ssh --no-pager
+lxc exec "{BUILDER}" -- ss -ltnp</pre>
+                </div>
+                <p>If the distro uses <code>sshd</code> instead of <code>ssh</code>, adjust service name.</p>
+              </div>
+            </details>
+          </div>
+        </section>
+
+        <section id="ftp" data-step="ftp">
+          <div class="section-head">
+            <div>
+              <h2>6. Point FTP at read-only public output</h2>
+              <p>FTP serves completed artifacts only. No upload credentials, no ingest mount.</p>
+            </div>
+            <label class="step-check"><input type="checkbox" data-complete="ftp"> Done</label>
+          </div>
+
+          <div class="step-focus">
+            <div class="focus-item"><span>Read path</span><strong>FTP sees only <code>{FTP_MOUNT}</code>.</strong><p>No ingest storage.</p></div>
+            <div class="focus-item"><span>Write test</span><strong>Writes should fail.</strong><p>The LXD disk is read-only.</p></div>
+            <div class="focus-item"><span>Listing</span><strong>Hide dotfiles and temp dirs.</strong><p>Do not expose finalizer staging paths.</p></div>
+          </div>
+
+          <div class="command-block">
+            <div class="command-head"><span>Confirm FTP read-only</span><button class="copy" type="button">Copy</button></div>
+            <pre data-template>lxc exec "{FTP}" -- ls -la "{FTP_MOUNT}"
+lxc exec "{FTP}" -- sh -c 'test -r "{FTP_MOUNT}"'
+lxc exec "{FTP}" -- sh -c 'touch "{FTP_MOUNT}/.must-not-write"'</pre>
+          </div>
+
+          <div class="panel">
+            <details>
+              <summary>Expected FTP result</summary>
+              <div class="detail-body">
+                <p>First two commands pass. Write test fails.</p>
+              </div>
+            </details>
+            <details>
+              <summary>Hide finalizer staging paths from FTP</summary>
+              <div class="detail-body">
+                <p>The finalizer writes temp files under <code>/snapshots/&lt;chain&gt;/.tmp</code>. FTP must not list or serve dot paths.</p>
+                <p>Read-only blocks writes, not reads.</p>
+              </div>
+            </details>
+            <details>
+              <summary>FTP dotfile examples</summary>
+              <div class="detail-body">
+                <p>Use your FTP daemon's dotfile hiding option. Verify with an FTP client after first upload.</p>
+                <div class="command-block">
+                  <div class="command-head"><span>Examples to adapt</span><button class="copy" type="button">Copy</button></div>
+                  <pre data-template># vsftpd: keep force_dot_files disabled or absent.
+# proftpd: use path filters or HideFiles to block dot paths.
+# pure-ftpd: do not expose hidden files.
+
+lxc exec "{FTP}" -- find "{FTP_MOUNT}" -maxdepth 3 -name '.tmp' -print</pre>
+                </div>
+              </div>
+            </details>
+            <details>
+              <summary>Public artifact layout</summary>
+              <div class="detail-body">
+                <p>After first finalize, FTP should show:</p>
+                <div class="command-block">
+                  <div class="command-head"><span>Expected files</span><button class="copy" type="button">Copy</button></div>
+                  <pre data-template>{FTP_MOUNT}/{CHAIN}/
+  {CHAIN}-YYYYMMDDTHHMMSSZ.tar.zst
+  {CHAIN}-YYYYMMDDTHHMMSSZ.tar.zst.sha256
+  {CHAIN}-YYYYMMDDTHHMMSSZ.tar.zst.json
+  latest.tar.zst
+  latest.sha256
+  latest.json</pre>
+                </div>
+              </div>
+            </details>
+          </div>
+        </section>
+
+        <div class="runbook-divider client" id="client-runbook">
+          <div>
+            <strong>Client/source runbook</strong>
+            <h2>Stage a consistent DB copy</h2>
+            <p>The source operator installs config, edits local values if needed, seeds once, then runs rsync manually or by timer.</p>
+            <p><a href="/">Open the index</a> for external handoff.</p>
+          </div>
+          <div class="mini-list" aria-label="Client runbook checkpoints">
+            <div class="mini-item"><span class="badge">1</span><div>Install helper and config</div></div>
+            <div class="mini-item"><span class="badge">2</span><div>Preflight paths</div></div>
+            <div class="mini-item"><span class="badge">3</span><div>Bootstrap once, then rsync</div></div>
+          </div>
+        </div>
+
+        <section id="source" data-step="source">
+          <div class="section-head">
+            <div>
+              <h2>7. Set up source config</h2>
+              <p>The source user needs root/sudo to install the helper and stop the node. Server paths stay private.</p>
+            </div>
+            <label class="step-check"><input type="checkbox" data-complete="source"> Done</label>
+          </div>
+
+          <div class="step-focus">
+            <div class="focus-item"><span>Node home</span><strong>Use <code>~/.genesisd</code> or equivalent.</strong><p>The helper reads only the data subdir.</p></div>
+            <div class="focus-item"><span>Staging</span><strong>Separate local or mounted path.</strong><p>Rsync updates this copy before upload.</p></div>
+            <div class="focus-item"><span>Boundary</span><strong>No server paths in client config.</strong><p>The wrapper owns builder paths.</p></div>
+          </div>
+
+          <div class="command-block">
+            <div class="command-head"><span>Install source deps</span><button class="copy" type="button">Copy</button></div>
+            <pre data-template># Run on the source node as root/sudo.
+apt-get update
+apt-get install -y python3 rsync openssh-client tar</pre>
+          </div>
+
+          <div class="command-block">
+            <div class="command-head"><span>Install source helper</span><button class="copy" type="button">Copy</button></div>
+            <pre data-template># Run on the source node after receiving scripts/cosmos-snapshot-upload.
+install -m 0755 scripts/cosmos-snapshot-upload /usr/local/bin/cosmos-snapshot-upload</pre>
+          </div>
+
+          <div class="command-block">
+            <div class="command-head"><span>Write source-upload.env</span><button class="copy" type="button">Copy</button></div>
+            <pre data-template>install -d -m 0750 /etc/cosmos-snapshot
+umask 077
+cat &gt; /etc/cosmos-snapshot/source-upload.env &lt;&lt;'EOF'
+CHAIN="{CHAIN}"
+
+NODE_HOME="{USER_NODE_HOME}"
+DATA_SUBDIR="{USER_DATA_SUBDIR}"
+SERVICE_NAME="{USER_SERVICE_NAME}"
+SYSTEMCTL_COMMAND="{USER_SYSTEMCTL_COMMAND}"
+
+STAGING_PATH="{USER_STAGING_PATH}"
+
+REQUIRED_DB_DIRS="application.db blockstore.db state.db"
+STAGE_DB_DIRS="application.db blockstore.db state.db evidence.db tx_index.db"
+DB_MARKER_PATTERNS="CURRENT MANIFEST-* *.sst *.ldb"
+LOCAL_RSYNC_EXTRA_ARGS="--numeric-ids"
+
+BUILDER_SSH="{UPLOAD_USER}@{BUILDER_HOST}"
+BUILDER_SSH_PORT={SSH_PORT}
+SSH_OPTIONS="-o BatchMode=yes"
+REMOTE_COMMAND="cosmos-snapshot-remote"
+CLIENT_ID=""
+
+RSYNC_DELETE=1
+RSYNC_EXTRA_ARGS="--numeric-ids"
+VERIFY_REMOTE_RSYNC=1
+RSYNC_CHECKSUM=0
+BOOTSTRAP_UPLOAD=0
+RUN_FINALIZER=1
+DRY_RUN=0
+UPLOAD_SCHEDULE="{USER_UPLOAD_SCHEDULE}"
+EOF
+chmod 0600 /etc/cosmos-snapshot/source-upload.env</pre>
+          </div>
+
+          <div class="command-block">
+            <div class="command-head"><span>Local settings UI</span><button class="copy" type="button">Copy</button></div>
+            <pre data-template>cosmos-snapshot-upload --config /etc/cosmos-snapshot/source-upload.env --serve-ui --ui-host 127.0.0.1 --ui-port 8766</pre>
+          </div>
+
+          <div class="callout">
+            Run before first dry run to confirm node home, data subdir, and staging are separate.
+          </div>
+          <div class="command-block">
+            <div class="command-head"><span>Staging preflight</span><button class="copy" type="button">Copy</button></div>
+            <pre data-template>python3 -c 'from pathlib import Path
+node_home = Path("{USER_NODE_HOME}").expanduser().resolve()
+data = (node_home / "{USER_DATA_SUBDIR}").resolve()
+staging = Path("{USER_STAGING_PATH}").expanduser().resolve()
+if not node_home.is_dir():
+    raise SystemExit(f"NODE_HOME does not exist or is not a directory: {node_home}")
+if not data.is_dir():
+    raise SystemExit(f"DATA_SUBDIR does not exist or is not a directory under NODE_HOME: {data}")
+if node_home not in data.parents:
+    raise SystemExit("DATA_SUBDIR must resolve under NODE_HOME")
+if data == staging or data in staging.parents or staging in data.parents:
+    raise SystemExit("STAGING_PATH must be separate from source data path")'
+python3 -c 'from pathlib import Path
+staging = Path("{USER_STAGING_PATH}").expanduser()
+staging.parent.mkdir(parents=True, exist_ok=True)
+staging.parent.chmod(0o750)'</pre>
+          </div>
+
+          <div class="panel">
+            <details>
+              <summary>User-side values</summary>
+              <div class="detail-body">
+                <ul>
+                  <li><code>NODE_HOME</code> contains <code>config/</code>, <code>data/</code>, and keyrings, for example <code>~/.genesisd</code>.</li>
+                  <li><code>DATA_SUBDIR</code> is usually <code>data</code>; only that subdir is inspected.</li>
+                  <li><code>SERVICE_NAME</code> is the local systemd service stopped during staging.</li>
+                  <li><code>STAGING_PATH</code> is a separate local or mounted path maintained by rsync.</li>
+                  <li><code>UPLOAD_SCHEDULE</code> is used only by the optional timer.</li>
+                  <li><code>BUILDER_SSH</code>, <code>BUILDER_SSH_PORT</code>, and <code>REMOTE_COMMAND</code> are the exposed builder details.</li>
+                </ul>
+              </div>
+            </details>
+            <details>
+              <summary>Source-side safety policy</summary>
+              <div class="detail-body">
+                <p>The upload tool stages only public DB dirs from <code>NODE_HOME/DATA_SUBDIR</code>: <code>application.db</code>, <code>blockstore.db</code>, <code>state.db</code>, <code>evidence.db</code>, and <code>tx_index.db</code>.</p>
+                <p>It rejects validator state, keys, keyrings, WAL directories, state-sync snapshots, and arbitrary top-level paths.</p>
+                <p><code>CLIENT_ID</code> stays blank; forced-command SSH identifies the user.</p>
+              </div>
+            </details>
+          </div>
+        </section>
+
+        <section id="user-upload" data-step="user-upload">
+          <div class="section-head">
+            <div>
+              <h2>8. Run dry run, seed, and routine upload</h2>
+              <p>The user previews commands, checks SSH, seeds once, then uploads manually or by timer.</p>
+            </div>
+            <label class="step-check"><input type="checkbox" data-complete="user-upload"> Done</label>
+          </div>
+
+          <div class="step-focus">
+            <div class="focus-item"><span>Dry run</span><strong>Preview first.</strong><p>Shows local staging and remote handshake.</p></div>
+            <div class="focus-item"><span>Initial seed</span><strong>Use <code>--bootstrap</code> once.</strong><p>Streams staged DB as tar.</p></div>
+            <div class="focus-item"><span>Routine</span><strong>Manual or timer rsync.</strong><p>Incrementally updates remote ingest.</p></div>
+          </div>
+
+          <div class="command-block">
+            <div class="command-head"><span>Dry run</span><button class="copy" type="button">Copy</button></div>
+            <pre data-template>cosmos-snapshot-upload --config /etc/cosmos-snapshot/source-upload.env --dry-run</pre>
+          </div>
+
+          <div class="command-block">
+            <div class="command-head"><span>SSH status</span><button class="copy" type="button">Copy</button></div>
+            <pre data-template>ssh -p {SSH_PORT} -o BatchMode=yes "{UPLOAD_USER}@{BUILDER_HOST}" \
+  cosmos-snapshot-remote status --chain "{CHAIN}"</pre>
+          </div>
+
+          <div class="command-block">
+            <div class="command-head"><span>Initial tar seed</span><button class="copy" type="button">Copy</button></div>
+            <pre data-template>cosmos-snapshot-upload --config /etc/cosmos-snapshot/source-upload.env --bootstrap</pre>
+          </div>
+
+          <div class="command-block">
+            <div class="command-head"><span>Normal rsync upload</span><button class="copy" type="button">Copy</button></div>
+            <pre data-template>cosmos-snapshot-upload --config /etc/cosmos-snapshot/source-upload.env</pre>
+          </div>
+
+          <div class="command-block">
+            <div class="command-head"><span>Optional timer</span><button class="copy" type="button">Copy</button></div>
+            <pre data-template>cat &gt; /etc/systemd/system/cosmos-snapshot-upload.service &lt;&lt;'EOF'
+[Unit]
+Description=Upload Cosmos snapshot database to builder
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/etc/cosmos-snapshot/source-upload.env
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/cosmos-snapshot-upload --config /etc/cosmos-snapshot/source-upload.env
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+EOF
+
+cat &gt; /etc/systemd/system/cosmos-snapshot-upload.timer &lt;&lt;'EOF'
+[Unit]
+Description=Run Cosmos snapshot upload on schedule
+
+[Timer]
+OnCalendar={USER_UPLOAD_SCHEDULE}
+RandomizedDelaySec=2h
+Persistent=true
+Unit=cosmos-snapshot-upload.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now cosmos-snapshot-upload.timer
+systemctl list-timers cosmos-snapshot-upload.timer</pre>
+          </div>
+
+          <div class="panel">
+            <details>
+              <summary>Upload flow</summary>
+              <div class="detail-body">
+                <p>The helper stops service, validates <code>NODE_HOME/DATA_SUBDIR</code>, stages allowed DB dirs, restarts, transfers, checksum-verifies, and requests finalization.</p>
+                <p>Dry run prints planned commands. Real upload validates while the service is stopped.</p>
+              </div>
+            </details>
+            <details>
+              <summary>Bootstrap use</summary>
+              <div class="detail-body">
+                <p>Use <code>--bootstrap</code> once when remote ingest is empty. It streams staged DB tar into builder ingest, then checksum-verifies.</p>
+                <p>After that, use normal rsync manually or by timer.</p>
+                <p>Do not use bootstrap for routine updates; it replaces remote ingest <code>data</code>.</p>
+              </div>
+            </details>
+            <details>
+              <summary>--no-finalize</summary>
+              <div class="detail-body">
+                <p>Use <code>--no-finalize</code> only for inspection before publish. The transfer marker remains until finalization succeeds.</p>
+                <div class="command-block">
+                  <div class="command-head"><span>Upload without publishing</span><button class="copy" type="button">Copy</button></div>
+                  <pre data-template>cosmos-snapshot-upload --config /etc/cosmos-snapshot/source-upload.env --no-finalize</pre>
+                </div>
+              </div>
+            </details>
+            <details>
+              <summary>User failures</summary>
+              <div class="detail-body">
+                <ul>
+                  <li><code>missing required Tendermint DB directory</code>: wrong node home, data subdir, or DB layout.</li>
+                  <li><code>STAGING_PATH must be separate from source data path</code>: choose a different staging root.</li>
+                  <li><code>remote rsync verification found pending changes</code>: upload differs from staging; retry before finalizing.</li>
+                  <li><code>client is not allowed</code>: forced-command client id and allowlist do not match.</li>
+                </ul>
+              </div>
+            </details>
+          </div>
+        </section>
+
+        <div class="runbook-divider final" id="handoff-runbook">
+          <div>
+            <strong>Handoff and operations</strong>
+            <h2>Prove publication before sharing URLs</h2>
+            <p>After first upload, check auth, archive integrity, FTP visibility, retention, and recovery.</p>
+          </div>
+          <div class="mini-list" aria-label="Handoff checkpoints">
+            <div class="mini-item"><span class="badge">1</span><div>Status confirms identity</div></div>
+            <div class="mini-item"><span class="badge">2</span><div>Archive and checksum before latest</div></div>
+            <div class="mini-item"><span class="badge">3</span><div>Keep ingest private</div></div>
+          </div>
+        </div>
+
+        <section id="validate" data-step="validate">
+          <div class="section-head">
+            <div>
+              <h2>9. Validate first snapshot</h2>
+              <p>Check auth, identity, mounts, and archive integrity.</p>
+            </div>
+            <label class="step-check"><input type="checkbox" data-complete="validate"> Done</label>
+          </div>
+
+          <div class="step-focus">
+            <div class="focus-item"><span>Status</span><strong>Wrapper identity matches.</strong><p>Chain and client id must match access control.</p></div>
+            <div class="focus-item"><span>Artifact</span><strong>Archive, checksum, manifest, latest links.</strong><p>All must exist before publish is complete.</p></div>
+            <div class="focus-item"><span>FTP</span><strong>Read only.</strong><p>FTP reads public files and fails write tests.</p></div>
+          </div>
+
+          <div class="command-block">
+            <div class="command-head"><span>Wrapper status</span><button class="copy" type="button">Copy</button></div>
+            <pre data-template>lxc exec "{BUILDER}" -- env COSMOS_SNAPSHOT_CLIENT_ID="{CLIENT_ID}" \
+  /usr/local/sbin/cosmos-snapshot-remote \
+  --config /etc/cosmos-snapshot-remote.env \
+  status --chain "{CHAIN}"</pre>
+          </div>
+
+          <div class="command-block">
+            <div class="command-head"><span>After first finalize</span><button class="copy" type="button">Copy</button></div>
+            <pre data-template>lxc exec "{BUILDER}" -- ls -la "/snapshots/{CHAIN}"
+lxc exec "{BUILDER}" -- sh -c 'cd "/snapshots/{CHAIN}" && sha256sum -c latest.sha256'
+lxc exec "{BUILDER}" -- tar -tf "/snapshots/{CHAIN}/latest.tar.zst" --use-compress-program=zstd &gt;/dev/null
+lxc exec "{FTP}" -- ls -la "{FTP_MOUNT}/{CHAIN}"</pre>
+          </div>
+
+          <div class="panel">
+            <details>
+              <summary>What success means</summary>
+              <div class="detail-body">
+                <p>Status proves client id and chain allowlist. Archive checks prove validation finished before <code>latest.*</code> moved.</p>
+              </div>
+            </details>
+            <details>
+              <summary>Common failures</summary>
+              <div class="detail-body">
+                <ul>
+                  <li><code>missing COSMOS_SNAPSHOT_CLIENT_ID</code>: key is not forced through the wrapper, or local test lacks env.</li>
+                  <li><code>not allowed</code>: client id and chain do not match <code>/etc/cosmos-snapshot-access.json</code>.</li>
+                  <li><code>refusing to package while transfer markers exist</code>: transfer failed or is active; do not publish partial data.</li>
+                  <li><code>required DB directory has no recognizable DB marker</code>: wrong path or incomplete DB.</li>
+                </ul>
+              </div>
+            </details>
+          </div>
+        </section>
+
+        <section id="operate" data-step="operate">
+          <div class="section-head">
+            <div>
+              <h2>10. Operate safely</h2>
+              <p>Keep one archive, public-only FTP, explicit allowlists, and no manual source-data repair.</p>
+            </div>
+            <label class="step-check"><input type="checkbox" data-complete="operate"> Done</label>
+          </div>
+
+          <div class="step-focus">
+            <div class="focus-item"><span>Retention</span><strong>Let the finalizer prune.</strong><p>Manual deletion is destructive.</p></div>
+            <div class="focus-item"><span>Recovery</span><strong>Failed transfers leave markers.</strong><p>Retry upload; do not force publish.</p></div>
+            <div class="focus-item"><span>Access</span><strong>Rotate clients in allowlist.</strong><p>Keep SSH ids and JSON in sync.</p></div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-body">
+              <div class="mini-list">
+                <div class="mini-item">
+                  <span class="badge">1</span>
+                  <div><strong>Rotate clients through access control.</strong> Update <code>/etc/cosmos-snapshot-access.json</code> and matching forced-command keys.</div>
+                </div>
+                <div class="mini-item">
+                  <span class="badge">2</span>
+                  <div><strong>Let the finalizer own retention.</strong> It prunes old archives after a new one validates and publishes.</div>
+                </div>
+                <div class="mini-item">
+                  <span class="badge">3</span>
+                  <div><strong>Do not expose ingest.</strong> Public services get the read-only public volume and hide dot paths.</div>
+                </div>
+                <div class="mini-item">
+                  <span class="badge">4</span>
+                  <div><strong>Do not repair source data on builder.</strong> Builder packages only what it receives after validation.</div>
+                </div>
+              </div>
+            </div>
+            <details>
+              <summary>Failed upload recovery</summary>
+              <div class="detail-body">
+                <p>A failed transfer leaves <code>/ingest/{CHAIN}/.transfer-in-progress</code>. The finalizer refuses to publish while it exists.</p>
+                <p>Confirm no rsync is active, then rerun source upload. Do not delete the marker just to publish.</p>
+              </div>
+            </details>
+            <details>
+              <summary>Audit checklist</summary>
+              <div class="detail-body">
+                <div class="command-block">
+                  <div class="command-head"><span>Periodic server checks</span><button class="copy" type="button">Copy</button></div>
+                  <pre data-template>lxc config device show "{BUILDER}"
+lxc config device show "{FTP}"
+lxc exec "{BUILDER}" -- find /ingest -maxdepth 3 -name '.transfer-in-progress' -print
+lxc exec "{BUILDER}" -- find "/snapshots/{CHAIN}" -maxdepth 1 -type f -name '{CHAIN}-*.tar.zst' -print
+lxc exec "{FTP}" -- sh -c 'test ! -e /ingest'</pre>
+                </div>
+              </div>
+            </details>
+          </div>
+
+          <div class="callout ok">
+            When complete, external writes go only through the authorized wrapper. FTP serves completed artifacts and hides staging paths.
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    const stateKey = "lxd-snapshotter-operator-setup";
+    const valuesKey = stateKey + ":values";
+    const completeKey = stateKey + ":complete";
+
+    const valueInputs = Array.from(document.querySelectorAll("[data-var]"));
+    const templates = Array.from(document.querySelectorAll("[data-template]"));
+    const completeInputs = Array.from(document.querySelectorAll("[data-complete]"));
+    const navLinks = Array.from(document.querySelectorAll("#nav a"));
+    const validationIssues = document.getElementById("validationIssues");
+
+    const variableRules = {
+      POOL: { pattern: /^[A-Za-z0-9._:-]+$/, message: "Use storage-pool characters only." },
+      BUILDER: { pattern: /^[A-Za-z0-9._-]+$/, message: "Use an LXD name." },
+      FTP: { pattern: /^[A-Za-z0-9._-]+$/, message: "Use an LXD name." },
+      CHAIN: { pattern: /^[A-Za-z0-9._-]+$/, message: "No spaces or slashes." },
+      CLIENT_ID: { pattern: /^[A-Za-z0-9._-]+$/, message: "No spaces or quotes." },
+      UPLOAD_USER: { pattern: /^[A-Za-z_][A-Za-z0-9._-]*$/, message: "Use a Unix account name." },
+      SSH_PORT: { validate: (value) => Number.isInteger(Number(value)) && Number(value) > 0 && Number(value) < 65536, message: "Use a TCP port from 1 to 65535." },
+      SSH_BIND_ADDR: { pattern: /^[A-Za-z0-9._:-]+$/, message: "Use an IP/hostname without spaces." },
+      FTP_MOUNT: { pattern: /^[A-Za-z0-9._~:/+-]+$/, message: "Use an absolute path without shell metacharacters." },
+      BUILDER_HOST: { pattern: /^[A-Za-z0-9._:-]+$/, message: "Use a hostname or address without spaces." },
+      USER_NODE_HOME: { pattern: /^[A-Za-z0-9._~:/+-]+$/, message: "Use a path without shell metacharacters." },
+      USER_DATA_SUBDIR: { validate: (value) => /^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/.test(value) && !value.split("/").includes(".."), message: "Use a relative subdir." },
+      USER_SERVICE_NAME: { pattern: /^[A-Za-z0-9_.@-]+$/, message: "Use a systemd service name." },
+      USER_STAGING_PATH: { pattern: /^[A-Za-z0-9._~:/+-]+$/, message: "Use a path without shell metacharacters." },
+      USER_UPLOAD_SCHEDULE: { pattern: /^[A-Za-z0-9*,: ._-]+$/, message: "Use a systemd OnCalendar value." },
+      USER_SYSTEMCTL_COMMAND: { pattern: /^(sudo )?systemctl$/, message: "Use systemctl or sudo systemctl." },
+    };
+
+    function readJson(key, fallback) {
+      try {
+        const raw = localStorage.getItem(key);
+        return raw ? JSON.parse(raw) : fallback;
+      } catch {
+        return fallback;
+      }
+    }
+
+    function collectValues() {
+      return Object.fromEntries(valueInputs.map((input) => [input.dataset.var, input.value.trim()]));
+    }
+
+    function validateVariable(name, value) {
+      const rule = variableRules[name];
+      if (!rule) return "";
+      if (!value) return "This value is required.";
+      if (/[\n\r"'`$\\;]/.test(value)) return "Remove shell metacharacters.";
+      if (rule.pattern && !rule.pattern.test(value)) return rule.message;
+      if (rule.validate && !rule.validate(value)) return rule.message;
+      return "";
+    }
+
+    function validateValues(values) {
+      const errors = {};
+      Object.entries(values).forEach(([name, value]) => {
+        const error = validateVariable(name, value);
+        if (error) errors[name] = error;
+      });
+      return errors;
+    }
+
+    function showValidation(errors) {
+      valueInputs.forEach((input) => {
+        const field = input.closest(".field");
+        const existing = field.querySelector(".validation-message");
+        if (existing) existing.remove();
+        const error = errors[input.dataset.var];
+        field.classList.toggle("invalid", Boolean(error));
+        if (error) {
+          const message = document.createElement("div");
+          message.className = "validation-message";
+          message.textContent = error;
+          field.appendChild(message);
+        }
+      });
+
+      const entries = Object.entries(errors);
+      validationIssues.classList.toggle("hidden", entries.length === 0);
+      validationIssues.innerHTML = entries.length
+        ? "Fix variables before copying:<ul>" + entries.map(([name, error]) => "<li><code>" + name + "</code>: " + error + "</li>").join("") + "</ul>"
+        : "";
+    }
+
+    function invalidTemplateText(errors) {
+      return [
+        "# Fix invalid variables before copying:",
+        ...Object.entries(errors).map(([name, error]) => "# - " + name + ": " + error),
+      ].join("\n");
+    }
+
+    function saveValues() {
+      localStorage.setItem(valuesKey, JSON.stringify(collectValues()));
+    }
+
+    function renderTemplates() {
+      const values = collectValues();
+      const errors = validateValues(values);
+      const hasErrors = Object.keys(errors).length > 0;
+      showValidation(errors);
+      templates.forEach((block) => {
+        if (!block.dataset.raw) {
+          block.dataset.raw = block.textContent;
+        }
+        const commandBlock = block.closest(".command-block");
+        const copy = commandBlock.querySelector(".copy");
+        commandBlock.classList.toggle("invalid", hasErrors);
+        copy.disabled = hasErrors;
+        block.textContent = hasErrors
+          ? invalidTemplateText(errors)
+          : block.dataset.raw.replace(/\{([A-Z0-9_]+)\}/g, (match, name) => {
+              return Object.prototype.hasOwnProperty.call(values, name) ? values[name] : match;
+            });
+      });
+    }
+
+    function saveComplete() {
+      const completed = completeInputs
+        .filter((input) => input.checked)
+        .map((input) => input.dataset.complete);
+      localStorage.setItem(completeKey, JSON.stringify(completed));
+      updateProgress();
+    }
+
+    function updateProgress() {
+      const total = completeInputs.length;
+      const done = completeInputs.filter((input) => input.checked).length;
+      const pct = total ? Math.round((done / total) * 100) : 0;
+      document.getElementById("progressText").textContent = done + " of " + total;
+      document.getElementById("progressFill").style.width = pct + "%";
+    }
+
+    async function copyBlock(button) {
+      if (button.disabled) return;
+      const block = button.closest(".command-block").querySelector("pre");
+      const text = block.textContent.trimEnd();
+      try {
+        await navigator.clipboard.writeText(text);
+        button.textContent = "Copied";
+        setTimeout(() => {
+          button.textContent = "Copy";
+        }, 1100);
+      } catch {
+        const range = document.createRange();
+        range.selectNodeContents(block);
+        const selection = window.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+        button.textContent = "Selected";
+        setTimeout(() => {
+          button.textContent = "Copy";
+        }, 1400);
+      }
+    }
+
+    function initStoredValues() {
+      const stored = readJson(valuesKey, {});
+      valueInputs.forEach((input) => {
+        if (Object.prototype.hasOwnProperty.call(stored, input.dataset.var)) {
+          input.value = stored[input.dataset.var];
+        }
+        input.addEventListener("input", () => {
+          saveValues();
+          renderTemplates();
+        });
+      });
+      renderTemplates();
+    }
+
+    function initProgress() {
+      const completed = new Set(readJson(completeKey, []));
+      completeInputs.forEach((input) => {
+        input.checked = completed.has(input.dataset.complete);
+        input.addEventListener("change", saveComplete);
+      });
+      updateProgress();
+    }
+
+    function initCopyButtons() {
+      document.querySelectorAll(".copy").forEach((button) => {
+        button.addEventListener("click", () => copyBlock(button));
+      });
+    }
+
+    function initScrollSpy() {
+      const sections = Array.from(document.querySelectorAll("header[id], section[id]"));
+      const observer = new IntersectionObserver((entries) => {
+        const visible = entries
+          .filter((entry) => entry.isIntersecting)
+          .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+        if (!visible) return;
+        navLinks.forEach((link) => {
+          link.classList.toggle("active", link.getAttribute("href") === "#" + visible.target.id);
+        });
+      }, { rootMargin: "-20% 0px -60% 0px", threshold: [0.1, 0.4, 0.7] });
+      sections.forEach((section) => observer.observe(section));
+    }
+
+    function initMobileJump() {
+      const select = document.getElementById("mobileJump");
+      select.addEventListener("change", () => {
+        document.querySelector(select.value).scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    }
+
+    function initPrint() {
+      const button = document.getElementById("printPage");
+      let opened = [];
+      window.addEventListener("beforeprint", () => {
+        opened = Array.from(document.querySelectorAll("details:not([open])"));
+        opened.forEach((detail) => detail.setAttribute("open", ""));
+      });
+      window.addEventListener("afterprint", () => {
+        opened.forEach((detail) => detail.removeAttribute("open"));
+        opened = [];
+      });
+      button.addEventListener("click", () => window.print());
+    }
+
+    initStoredValues();
+    initProgress();
+    initCopyButtons();
+    initScrollSpy();
+    initMobileJump();
+    initPrint();
+  </script>
+</body>
+</html>

@@ -1,64 +1,107 @@
 # Cosmos Snapshot Uploader
 
-Utilities for publishing Cosmos SDK / Tendermint / CometBFT node database snapshots.
+Tools for publishing Cosmos SDK / Tendermint / CometBFT database snapshots.
 
-The project is split into two sides:
+Client side stops the node, validates `NODE_HOME/DATA_SUBDIR`, stages allowed DB
+dirs, restarts, uploads over VPN/SSH, and asks the builder to finalize.
 
-- **Client side**: runs on the source node, briefly stops the node service, stages a clean database copy, uploads it, and triggers publication.
-- **Server side**: receives authorized uploads, packages the staged database, publishes the completed archive, and exposes only completed artifacts through whatever public file service you choose.
+Snapshot host side is operated by us. The client gets a VPN endpoint,
+forced-command SSH, and a prefilled config.
 
-This is for public/client-node database snapshots. It is not a validator-key backup system.
+This is not a validator-key backup tool.
 
 ## Flow
 
 ```text
-source node
-  stop service -> validate data dir -> stage allowed DB dirs -> restart service
-  rsync staged copy over the private transport
-  trigger remote finalizer
+source node:
+  stop -> validate -> stage allowed DB dirs -> restart
+  rsync staging copy, or bootstrap with one tar stream
+  request finalize
 
-snapshot server
-  authorize client -> receive rsync into managed ingest storage
-  validate uploaded DB -> create archive/checksum/manifest
-  atomically publish latest snapshot -> prune old managed archives
+snapshot host:
+  authorize client -> receive ingest data
+  validate DB -> create archive/checksum/manifest
+  publish latest atomically -> prune old managed archive
 ```
 
-The client does not configure server-side storage paths. Server paths live in server-side config only.
+The client never configures server storage paths.
 
 ## Files
 
-- `scripts/cosmos-snapshot-upload`: client-side source/stage/upload command.
-- `scripts/cosmos-snapshot-remote`: server-side restricted SSH command.
-- `scripts/cosmos-snapshot-finalize`: server-side package/publish command.
-- `config/source-upload.env.example`: client-side config template.
-- `config/remote.env.example`: server-side restricted command config template.
-- `config/finalizer.env.example`: server-side finalizer config template.
-- `config/access-control.json.example`: server-side client-to-chain allowlist template.
+- `scripts/cosmos-snapshot-upload`: source-node stage/upload command.
+- `config/source-upload.env.example`: source-node config template.
+- `index.html`: local guide index.
+- `guides/lxd-snapshotter-operator-setup.html`: server/operator runbook.
+- `guides/lxd-snapshotter-client-setup.html`: client runbook.
+- `tests/test_snapshot_tools.py`: behavior coverage.
 
 ## Client Side
 
-The client config should describe only the source node and the upload target:
+Open `index.html` locally. It links the server/operator and client/source
+runbooks. Each runbook has a print action.
+
+Transport uses the router VPN. The builder is VPN/LAN-only.
+
+Client config covers:
 
 - `CHAIN`
-- `DATA_PATH`
+- `NODE_HOME`
+- `DATA_SUBDIR` (usually `data`)
 - `SERVICE_NAME`
-- `STAGING_PATH`
-- SSH target/options for the authorized upload account
+- `STAGING_PATH` on local disk or a mounted share
+- upload SSH target/options
 - optional rsync tuning
 
-`cosmos-snapshot-upload` performs the local consistency step:
+Install the prefilled config at `/etc/cosmos-snapshot/source-upload.env`. Verify
+with one dry run and one bootstrap seed. Then run manually or by optional timer.
+
+Local settings UI:
+
+```bash
+cosmos-snapshot-upload --config /etc/cosmos-snapshot/source-upload.env --serve-ui --ui-host 127.0.0.1 --ui-port 8766
+```
+
+Real upload:
 
 ```text
 systemctl stop <service>
-validate <data path>
-rsync selected database directories to <staging path>
+validate <node home>/<data subdir>
+rsync selected DB dirs to <staging path>
 systemctl start <service>
 rsync <staging path> to the server
-verify remote copy with a checksum dry-run
+checksum dry-run verify
 request finalization
 ```
 
-Only known public database directories are staged by default:
+Set `NODE_HOME` to the dir containing `config/`, `data/`, and keyrings, for
+example `~/.genesisd`. The uploader reads only `NODE_HOME/DATA_SUBDIR`.
+
+`STAGING_PATH` is a persistent rsync copy. Use a mounted share if local disk
+cannot hold a second DB copy.
+
+First large seed:
+
+```bash
+cosmos-snapshot-upload --config /etc/cosmos-snapshot/source-upload.env --bootstrap
+```
+
+Bootstrap still runs stop/stage/restart, then streams a tar archive from
+`STAGING_PATH`. Later runs use normal rsync.
+
+Optional timer:
+
+```ini
+[Timer]
+OnCalendar=Mon,Thu *-*-* 03:15:00
+RandomizedDelaySec=2h
+Persistent=true
+Unit=cosmos-snapshot-upload.service
+```
+
+Handshake: `prepare`, transfer, checksum dry-run verify, `finalize`. Server
+validates before writing archive, checksum, manifest, and `latest.*`.
+
+Default staged directories:
 
 - `application.db`
 - `blockstore.db`
@@ -66,82 +109,40 @@ Only known public database directories are staged by default:
 - `evidence.db`
 - `tx_index.db`
 
-The uploader rejects arbitrary top-level paths and does not stage validator state, state-sync snapshots, WAL directories, keys, or keyrings.
+The uploader excludes validator state, state-sync snapshots, WALs, keys,
+keyrings, and arbitrary top-level paths.
 
-Useful client checks:
+Useful checks:
 
 ```bash
-cosmos-snapshot-upload --config ./source-upload.env --dry-run
-cosmos-snapshot-upload --config ./source-upload.env
+cosmos-snapshot-upload --config /etc/cosmos-snapshot/source-upload.env --dry-run
+systemctl list-timers cosmos-snapshot-upload.timer
 ```
 
-## Server Side
+## Snapshot Host Boundary
 
-The server owns:
+The source node does not set host storage, public paths, retention,
+publication, or ingest dirs. The restricted remote command owns them.
 
-- upload authorization
-- ingest storage location
-- public artifact storage location
-- archive format
-- publication and retention
-
-Use a dedicated upload account and force its SSH keys through `cosmos-snapshot-remote`. The forced command should set `COSMOS_SNAPSHOT_CLIENT_ID` and pass the trusted remote config path as command arguments.
-
-Example key shape:
-
-```text
-command="/usr/bin/env COSMOS_SNAPSHOT_CLIENT_ID=example-source /usr/local/sbin/cosmos-snapshot-remote --config /etc/cosmos-snapshot-remote.env",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty ssh-ed25519 AAAA... example-source
-```
-
-The remote wrapper allows only:
-
-- `prepare --chain <chain>`
-- `rsync --chain <chain>`
-- `finalize --chain <chain>`
-- `status --chain <chain>`
-
-It checks the client allowlist before every operation and rewrites the rsync destination to the server-configured ingest path. A client cannot select the server-side destination path.
-
-The finalizer publishes:
-
-```text
-<public-root>/<chain>/
-  <chain>-YYYYMMDDTHHMMSSZ.tar.zst
-  <chain>-YYYYMMDDTHHMMSSZ.tar.zst.sha256
-  <chain>-YYYYMMDDTHHMMSSZ.tar.zst.json
-  latest.tar.zst
-  latest.sha256
-  latest.json
-```
-
-Retention is fixed to one completed managed archive per chain. Older managed archives are pruned only after the new archive validates and publishes.
+The client may request only allowed chain operations: `prepare`, `rsync`,
+`bootstrap`, `status`, `finalize`.
 
 ## Validation
 
-Both sides validate the data layout before doing the next risky step.
+Both sides validate before the next risky step.
 
-By default, a valid upload must include recognizable Tendermint database markers in:
+Required DB dirs:
 
 - `application.db`
 - `blockstore.db`
 - `state.db`
 
-This validation catches wrong paths and incomplete uploads. It does not prove a live database copy is internally consistent; the client-side service stop is what creates the consistent staging source.
-
-## Public Serving
-
-Public serving is intentionally separate from upload/build. The public file service should receive read-only access to completed artifacts only. It should not receive:
-
-- ingest storage
-- upload credentials
-- SSH access
-- write access to published snapshots
-
-The file service can be FTP, HTTP, object storage sync, or another deployment-specific serving layer.
+Validation catches wrong paths and incomplete uploads. Service stop creates
+the consistent staging source.
 
 ## Verification
 
 ```bash
 python3 -m unittest discover -s tests
-python3 -m py_compile scripts/cosmos-snapshot-finalize scripts/cosmos-snapshot-upload scripts/cosmos-snapshot-remote
+python3 -m py_compile scripts/cosmos-snapshot-upload
 ```

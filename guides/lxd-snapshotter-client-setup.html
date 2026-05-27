@@ -1,0 +1,810 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Snapshot Upload Setup</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f7f8f5;
+      --ink: #1e2420;
+      --muted: #5f675f;
+      --line: #d6ddd3;
+      --panel: #ffffff;
+      --soft: #eef4f1;
+      --accent: #16734f;
+      --accent-dark: #0f563a;
+      --blue: #2b5c88;
+      --warn: #986300;
+      --danger: #a23c3c;
+      --code: #151a17;
+      --code-ink: #edf4ed;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.5;
+      letter-spacing: 0;
+    }
+    button, input, select { font: inherit; letter-spacing: 0; }
+    a { color: inherit; }
+
+    .mobile-jump {
+      display: none;
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      border-bottom: 1px solid var(--line);
+      background: rgba(247, 248, 245, 0.96);
+      padding: 10px 14px;
+    }
+    .mobile-jump select {
+      width: 100%;
+      min-height: 40px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--ink);
+      padding: 8px 10px;
+    }
+
+    .shell {
+      min-height: 100vh;
+      display: grid;
+      grid-template-columns: 270px minmax(0, 1fr);
+    }
+    aside {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      overflow-y: auto;
+      border-right: 1px solid var(--line);
+      background: rgba(247, 248, 245, 0.94);
+      padding: 22px 18px;
+    }
+    .brand { display: grid; gap: 6px; margin-bottom: 20px; }
+    .brand strong { font-size: 18px; line-height: 1.2; }
+    .brand span { color: var(--muted); font-size: 13px; }
+    .nav { display: grid; gap: 5px; }
+    .nav a {
+      display: block;
+      border-radius: 6px;
+      padding: 8px 9px;
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 13px;
+    }
+    .nav a:hover, .nav a.active { background: var(--soft); color: var(--ink); }
+
+    main { min-width: 0; padding-bottom: 72px; }
+    .hero {
+      min-height: 50vh;
+      display: grid;
+      align-items: center;
+      padding: 52px clamp(20px, 5vw, 72px);
+      border-bottom: 1px solid var(--line);
+      background:
+        linear-gradient(120deg, rgba(247, 248, 245, 0.96), rgba(235, 241, 237, 0.82)),
+        repeating-linear-gradient(0deg, rgba(30, 36, 32, 0.045) 0, rgba(30, 36, 32, 0.045) 1px, transparent 1px, transparent 42px);
+    }
+    .kicker {
+      margin: 0 0 10px;
+      color: var(--accent-dark);
+      font-size: 12px;
+      font-weight: 900;
+      text-transform: uppercase;
+    }
+    h1 { max-width: 820px; margin: 0; font-size: 52px; line-height: 1; letter-spacing: 0; }
+    .hero p { max-width: 780px; color: var(--muted); font-size: 18px; margin: 18px 0 0; }
+    .hero-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 24px; }
+    .button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 42px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--ink);
+      padding: 10px 14px;
+      text-decoration: none;
+      cursor: pointer;
+      font-weight: 700;
+      font-size: 14px;
+    }
+    .button.primary { border-color: var(--accent); background: var(--accent); color: #fff; }
+
+    section {
+      scroll-margin-top: 20px;
+      padding: 38px clamp(20px, 5vw, 72px);
+      border-bottom: 1px solid var(--line);
+    }
+    .section-head { margin-bottom: 18px; }
+    h2 { margin: 0; font-size: 32px; line-height: 1.08; }
+    .section-head p { max-width: 780px; margin: 8px 0 0; color: var(--muted); }
+
+    .focus {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 1px;
+      margin-bottom: 16px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      background: var(--line);
+    }
+    .focus div { background: #fff; padding: 13px 14px; }
+    .focus span {
+      display: block;
+      margin-bottom: 4px;
+      color: var(--accent-dark);
+      font-size: 11px;
+      font-weight: 900;
+      text-transform: uppercase;
+    }
+    .focus strong { display: block; font-size: 15px; line-height: 1.25; }
+    .focus p { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      overflow: hidden;
+    }
+    .panel-body { padding: 16px; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .group-title {
+      margin: 0 0 12px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 900;
+      text-transform: uppercase;
+    }
+    .panel + .panel, .command-block + .panel, .panel + .command-block { margin-top: 14px; }
+    label.field { display: grid; gap: 6px; min-width: 0; }
+    label.field.wide { grid-column: span 2; }
+    label.field.wide input { font-size: 13px; }
+    label.field span { color: var(--muted); font-size: 12px; font-weight: 900; text-transform: uppercase; }
+    input[type="text"], input[type="number"] {
+      width: 100%;
+      min-height: 42px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--ink);
+      padding: 9px 11px;
+    }
+    label.field.invalid input { border-color: var(--danger); background: #fff5f3; }
+    .validation-message { margin-top: 6px; color: var(--danger); font-size: 12px; font-weight: 700; }
+
+    .callout {
+      margin: 14px 0 0;
+      border: 1px solid var(--line);
+      border-left: 4px solid var(--blue);
+      border-radius: 8px;
+      background: #f1f6fb;
+      padding: 13px 14px;
+      color: #294c68;
+    }
+    .callout.ok { border-left-color: var(--accent); background: #f1fbf5; color: #285442; }
+    .callout.warn { border-left-color: var(--warn); background: #fff9ed; color: #604615; }
+    .callout.danger { border-left-color: var(--danger); background: #fff5f3; color: #6d2f2f; }
+    .hidden { display: none !important; }
+    .print-only { display: none; }
+
+    .command-block {
+      min-width: 0;
+      max-width: 100%;
+      margin: 14px 0 0;
+      border-radius: 8px;
+      overflow: hidden;
+      background: var(--code);
+    }
+    .command-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-height: 42px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+      padding: 8px 12px;
+      color: #c6d1c4;
+      font-size: 12px;
+      font-weight: 900;
+      text-transform: uppercase;
+    }
+    .copy {
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      border-radius: 7px;
+      background: rgba(255, 255, 255, 0.08);
+      color: #fff;
+      padding: 7px 10px;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 800;
+    }
+    .copy:disabled { cursor: not-allowed; opacity: 0.48; }
+    .command-block.invalid pre { color: #ffd6d1; }
+    pre {
+      margin: 0;
+      max-width: 100%;
+      max-height: 420px;
+      overflow: auto;
+      padding: 15px;
+      color: var(--code-ink);
+      font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      white-space: pre;
+    }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+
+    details { border-top: 1px solid var(--line); background: #fbfcfa; }
+    details:first-child { border-top: 0; }
+    summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 13px 16px;
+      cursor: pointer;
+      color: var(--ink);
+      font-weight: 800;
+    }
+    summary::before {
+      content: "Optional";
+      flex: 0 0 auto;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--panel);
+      color: var(--muted);
+      padding: 3px 8px;
+      font-size: 11px;
+      font-weight: 900;
+      text-transform: uppercase;
+    }
+    summary::after {
+      content: "+";
+      width: 26px;
+      height: 26px;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--line);
+      border-radius: 50%;
+      color: var(--muted);
+      flex: 0 0 auto;
+    }
+    details[open] summary::after { content: "-"; }
+    .detail-body { padding: 0 16px 16px; color: var(--muted); }
+    .detail-body p { margin: 0 0 10px; }
+    .detail-body ul { margin: 8px 0 0; padding-left: 22px; }
+    .detail-body li + li { margin-top: 6px; }
+
+    @media (max-width: 980px) {
+      .shell { display: block; }
+      aside { display: none; }
+      .mobile-jump { display: block; }
+      .hero { min-height: auto; scroll-margin-top: 80px; }
+      section { scroll-margin-top: 80px; }
+      .grid, .grid.two, .focus { grid-template-columns: 1fr; }
+      label.field.wide { grid-column: auto; }
+    }
+    @media (max-width: 640px) {
+      h1 { font-size: 40px; }
+      h2 { font-size: 28px; }
+      .hero, section { padding-left: 16px; padding-right: 16px; }
+      .button, .hero-actions { width: 100%; }
+    }
+    @media print {
+      aside,
+      .mobile-jump,
+      .hero-actions,
+      .copy {
+        display: none !important;
+      }
+      .shell { display: block; }
+      body { background: #fff; }
+      section,
+      .hero {
+        break-inside: avoid;
+        border-bottom: 1px solid #bbb;
+        padding: 24px 0;
+      }
+      .panel,
+      .command-block {
+        box-shadow: none;
+      }
+      details {
+        break-inside: avoid;
+      }
+      input {
+        border: 0;
+        border-bottom: 1px solid #aaa;
+        border-radius: 0;
+      }
+      .print-only { display: block; }
+    }
+  </style>
+</head>
+<body>
+  <div class="mobile-jump">
+    <select id="mobileJump" aria-label="Jump to section">
+      <option value="#overview">Overview</option>
+      <option value="#values">Values</option>
+      <option value="#install">Install and config</option>
+      <option value="#preflight">Preflight</option>
+      <option value="#upload">First run</option>
+      <option value="#failures">Failures</option>
+    </select>
+  </div>
+
+  <div class="shell">
+    <aside>
+      <div class="brand">
+        <strong>Snapshot Upload Setup</strong>
+        <span>Client handoff.</span>
+      </div>
+      <nav class="nav" id="nav">
+        <a href="#overview">Overview</a>
+        <a href="#values">Values</a>
+        <a href="#install">Install and config</a>
+        <a href="#preflight">Preflight</a>
+        <a href="#upload">First run</a>
+        <a href="#failures">Failures</a>
+      </nav>
+    </aside>
+
+    <main>
+      <header class="hero" id="overview">
+        <p class="kicker">Client guide</p>
+        <h1>Upload node DB snapshots</h1>
+        <p>Connect to the router VPN, install the prefilled config, run one verified seed, then refresh by rsync manually or on a timer.</p>
+        <div class="hero-actions">
+          <a class="button primary" href="#values">Start setup</a>
+          <a class="button" href="/">Index</a>
+          <button class="button" type="button" id="printPage">Print runbook</button>
+        </div>
+        <div class="callout">
+          Router VPN is the public entry point. Upload host is VPN-only.
+        </div>
+      </header>
+
+      <section id="values">
+        <div class="section-head">
+          <h2>1. Confirm values</h2>
+          <p>Server values are prefilled. The source operator sets node home, service, staging path, and optional schedule.</p>
+        </div>
+
+        <div class="focus">
+          <div><span>Transport</span><strong>VPN first.</strong><p>SSH works over VPN only.</p></div>
+          <div><span>Source</span><strong>Stage from <code>NODE_HOME/data</code>.</strong><p>Set the daemon home, for example <code>~/.genesisd</code>.</p></div>
+          <div><span>Server</span><strong>No builder paths.</strong><p>The remote wrapper owns ingest and public storage.</p></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-body">
+            <p class="group-title">Server values</p>
+            <div class="grid">
+              <label class="field"><span>Chain name</span><input type="text" data-var="CHAIN" value="examplechain"></label>
+              <label class="field"><span>Upload account</span><input type="text" data-var="UPLOAD_USER" value="snapupload"></label>
+              <label class="field"><span>Builder host</span><input type="text" data-var="BUILDER_HOST" value="snapshot-builder.vpn"></label>
+              <label class="field"><span>SSH port</span><input type="number" data-var="SSH_PORT" value="2222"></label>
+              <label class="field"><span>Remote command</span><input type="text" data-var="REMOTE_COMMAND" value="cosmos-snapshot-remote"></label>
+              <label class="field wide"><span>Config path</span><input type="text" data-var="CONFIG_PATH" value="/etc/cosmos-snapshot/source-upload.env"></label>
+            </div>
+          </div>
+          <div class="panel-body">
+            <p class="group-title">Source values</p>
+            <div class="grid">
+              <label class="field"><span>Node home</span><input type="text" data-var="NODE_HOME" value="~/.genesisd"></label>
+              <label class="field"><span>Data subdir</span><input type="text" data-var="DATA_SUBDIR" value="data"></label>
+              <label class="field"><span>Node service</span><input type="text" data-var="SERVICE_NAME" value="examplechain.service"></label>
+              <label class="field"><span>systemctl</span><input type="text" data-var="SYSTEMCTL_COMMAND" value="systemctl"></label>
+              <label class="field"><span>Staging path</span><input type="text" data-var="STAGING_PATH" value="/var/tmp/examplechain-stage"></label>
+              <label class="field"><span>Schedule</span><input type="text" data-var="UPLOAD_SCHEDULE" value="Mon,Thu *-*-* 03:15:00"></label>
+            </div>
+            <div class="callout">
+              <code>STAGING_PATH</code> can be local disk or a mounted share. It stays in place; first rsync is full, later rsyncs are incremental.
+            </div>
+            <div id="validationIssues" class="callout danger hidden" role="alert"></div>
+          </div>
+          <details>
+            <summary>SSH key</summary>
+            <div class="detail-body">
+              <p>The server installs the source public key with a forced command. For a custom key, use <code>~/.ssh/config</code> or add absolute <code>-i /path/to/key</code> to <code>SSH_OPTIONS</code>.</p>
+            </div>
+          </details>
+        </div>
+      </section>
+
+      <section id="install">
+        <div class="section-head">
+          <h2>2. Install helper and config</h2>
+          <p>Run as root/sudo on the source node. Manual runs and timer share this config.</p>
+        </div>
+
+        <div class="command-block">
+          <div class="command-head"><span>Install tools and helper</span><button class="copy" type="button">Copy</button></div>
+          <pre data-template># Run on the source node as root, or prefix with sudo.
+apt-get update
+apt-get install -y python3 rsync openssh-client tar
+install -m 0755 scripts/cosmos-snapshot-upload /usr/local/bin/cosmos-snapshot-upload</pre>
+        </div>
+
+        <div class="command-block">
+          <div class="command-head"><span>Write source-upload.env</span><button class="copy" type="button">Copy</button></div>
+          <pre data-template>install -d -m 0750 "$(dirname "{CONFIG_PATH}")"
+umask 077
+cat > "{CONFIG_PATH}" &lt;&lt;'EOF'
+CHAIN="{CHAIN}"
+
+NODE_HOME="{NODE_HOME}"
+DATA_SUBDIR="{DATA_SUBDIR}"
+SERVICE_NAME="{SERVICE_NAME}"
+SYSTEMCTL_COMMAND="{SYSTEMCTL_COMMAND}"
+
+STAGING_PATH="{STAGING_PATH}"
+
+REQUIRED_DB_DIRS="application.db blockstore.db state.db"
+STAGE_DB_DIRS="application.db blockstore.db state.db evidence.db tx_index.db"
+DB_MARKER_PATTERNS="CURRENT MANIFEST-* *.sst *.ldb"
+LOCAL_RSYNC_EXTRA_ARGS="--numeric-ids"
+
+BUILDER_SSH="{UPLOAD_USER}@{BUILDER_HOST}"
+BUILDER_SSH_PORT={SSH_PORT}
+SSH_OPTIONS="-o BatchMode=yes"
+REMOTE_COMMAND="{REMOTE_COMMAND}"
+CLIENT_ID=""
+
+RSYNC_DELETE=1
+RSYNC_EXTRA_ARGS="--numeric-ids"
+VERIFY_REMOTE_RSYNC=1
+RSYNC_CHECKSUM=0
+BOOTSTRAP_UPLOAD=0
+RUN_FINALIZER=1
+DRY_RUN=0
+UPLOAD_SCHEDULE="{UPLOAD_SCHEDULE}"
+EOF
+chmod 0600 "{CONFIG_PATH}"</pre>
+        </div>
+
+        <details class="panel">
+          <summary>Upload contents</summary>
+          <div class="detail-body">
+            <p>The helper stages only public DB dirs from <code>NODE_HOME/DATA_SUBDIR</code>: <code>application.db</code>, <code>blockstore.db</code>, <code>state.db</code>, <code>evidence.db</code>, and <code>tx_index.db</code>.</p>
+            <p>It excludes <code>config/</code>, keyrings, validator state, <code>cs.wal</code>, state-sync <code>snapshots/</code>, and arbitrary top-level paths.</p>
+          </div>
+        </details>
+
+        <details class="panel">
+          <summary>Optional local settings UI</summary>
+          <div class="detail-body">
+            <p>Edit exposed client values in a browser. It binds to loopback; use an SSH tunnel if needed.</p>
+            <div class="command-block">
+              <div class="command-head"><span>Serve local config UI</span><button class="copy" type="button">Copy</button></div>
+              <pre data-template>cosmos-snapshot-upload --config "{CONFIG_PATH}" --serve-ui --ui-host 127.0.0.1 --ui-port 8766</pre>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <section id="preflight">
+        <div class="section-head">
+          <h2>3. Preflight paths and VPN access</h2>
+          <p>Run before first dry run. It catches bad paths and checks VPN SSH.</p>
+        </div>
+
+        <div class="command-block">
+          <div class="command-head"><span>Local path preflight</span><button class="copy" type="button">Copy</button></div>
+          <pre data-template>python3 -c 'from pathlib import Path
+node_home = Path("{NODE_HOME}").expanduser().resolve()
+data = (node_home / "{DATA_SUBDIR}").resolve()
+staging = Path("{STAGING_PATH}").expanduser().resolve()
+if not node_home.is_dir():
+    raise SystemExit(f"NODE_HOME does not exist or is not a directory: {node_home}")
+if not data.is_dir():
+    raise SystemExit(f"DATA_SUBDIR does not exist under NODE_HOME: {data}")
+if node_home not in data.parents:
+    raise SystemExit("DATA_SUBDIR must resolve under NODE_HOME")
+if data == staging or data in staging.parents or staging in data.parents:
+    raise SystemExit("STAGING_PATH must be separate from source data path")
+staging.parent.mkdir(parents=True, exist_ok=True)
+staging.parent.chmod(0o750)'</pre>
+        </div>
+
+        <div class="command-block">
+          <div class="command-head"><span>VPN SSH status</span><button class="copy" type="button">Copy</button></div>
+          <pre data-template>ssh -p {SSH_PORT} -o BatchMode=yes "{UPLOAD_USER}@{BUILDER_HOST}" \
+  {REMOTE_COMMAND} status --chain "{CHAIN}"</pre>
+        </div>
+      </section>
+
+      <section id="upload">
+        <div class="section-head">
+          <h2>4. Dry run, seed once, then run routine uploads</h2>
+          <p>Real upload stops the service, stages allowed DB dirs, restarts, transfers, verifies, then requests publish.</p>
+        </div>
+
+        <div class="focus">
+          <div><span>Dry run</span><strong>Run first.</strong><p>Preview local and remote commands.</p></div>
+          <div><span>Bootstrap</span><strong>First upload only.</strong><p>Seed empty ingest with a tar stream.</p></div>
+          <div><span>Routine</span><strong>Manual or timer.</strong><p>Rsync the staging copy.</p></div>
+        </div>
+
+        <div class="command-block">
+          <div class="command-head"><span>Dry run</span><button class="copy" type="button">Copy</button></div>
+          <pre data-template>cosmos-snapshot-upload --config "{CONFIG_PATH}" --dry-run</pre>
+        </div>
+        <div class="command-block">
+          <div class="command-head"><span>Initial seed</span><button class="copy" type="button">Copy</button></div>
+          <pre data-template>cosmos-snapshot-upload --config "{CONFIG_PATH}" --bootstrap</pre>
+        </div>
+        <div class="command-block">
+          <div class="command-head"><span>Normal upload now</span><button class="copy" type="button">Copy</button></div>
+          <pre data-template>cosmos-snapshot-upload --config "{CONFIG_PATH}"</pre>
+        </div>
+
+        <details class="panel">
+          <summary>Optional recurring timer</summary>
+          <div class="detail-body">
+            <p>Enable only for automatic refreshes. Change <code>UPLOAD_SCHEDULE</code> before copying.</p>
+            <div class="command-block">
+              <div class="command-head"><span>Install timer</span><button class="copy" type="button">Copy</button></div>
+              <pre data-template>cat > /etc/systemd/system/cosmos-snapshot-upload.service &lt;&lt;'EOF'
+[Unit]
+Description=Upload Cosmos snapshot database to builder
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists={CONFIG_PATH}
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/cosmos-snapshot-upload --config {CONFIG_PATH}
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+EOF
+
+cat > /etc/systemd/system/cosmos-snapshot-upload.timer &lt;&lt;'EOF'
+[Unit]
+Description=Run Cosmos snapshot upload on schedule
+
+[Timer]
+OnCalendar={UPLOAD_SCHEDULE}
+RandomizedDelaySec=2h
+Persistent=true
+Unit=cosmos-snapshot-upload.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now cosmos-snapshot-upload.timer
+systemctl list-timers cosmos-snapshot-upload.timer</pre>
+            </div>
+          </div>
+        </details>
+
+        <div class="callout ok">
+          After bootstrap, normal mode rsyncs local and remote staging. The builder validates before publishing.
+        </div>
+
+        <details class="panel">
+          <summary>Adjust or disable the timer later</summary>
+          <div class="detail-body">
+            <div class="command-block">
+              <div class="command-head"><span>Timer controls</span><button class="copy" type="button">Copy</button></div>
+              <pre data-template># Edit OnCalendar in /etc/systemd/system/cosmos-snapshot-upload.timer, then:
+systemctl daemon-reload
+systemctl restart cosmos-snapshot-upload.timer
+systemctl list-timers cosmos-snapshot-upload.timer
+
+# Disable automatic uploads:
+systemctl disable --now cosmos-snapshot-upload.timer</pre>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <section id="failures">
+        <div class="section-head">
+          <h2>5. Common failures</h2>
+          <p>Fix the path, VPN/SSH, or allowlist issue, then rerun. Do not publish partial ingest manually.</p>
+        </div>
+
+        <div class="panel">
+          <div class="panel-body">
+            <ul>
+              <li><code>missing required Tendermint DB directory</code>: wrong node home, data subdir, or DB layout.</li>
+              <li><code>STAGING_PATH must be separate</code>: choose a path outside the live DB tree.</li>
+              <li><code>Permission denied</code> or timeout: connect VPN, then check key and account.</li>
+              <li><code>client is not allowed</code>: identity and chain allowlist do not match.</li>
+              <li><code>remote rsync verification found pending changes</code>: remote copy differs; retry.</li>
+              <li><code>systemctl list-timers</code> shows no timer: timer is disabled or not installed.</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    const valuesKey = "lxd-snapshotter-client-setup:values";
+    const valueInputs = Array.from(document.querySelectorAll("[data-var]"));
+    const templates = Array.from(document.querySelectorAll("[data-template]"));
+    const navLinks = Array.from(document.querySelectorAll("#nav a"));
+    const validationIssues = document.getElementById("validationIssues");
+
+    const variableRules = {
+      CHAIN: { pattern: /^[A-Za-z0-9._-]+$/, message: "No spaces or slashes." },
+      UPLOAD_USER: { pattern: /^[A-Za-z_][A-Za-z0-9._-]*$/, message: "Use a Unix account name." },
+      BUILDER_HOST: { pattern: /^[A-Za-z0-9._:-]+$/, message: "Use a hostname or address without spaces." },
+      SSH_PORT: { validate: (value) => Number.isInteger(Number(value)) && Number(value) > 0 && Number(value) < 65536, message: "Use a TCP port from 1 to 65535." },
+      REMOTE_COMMAND: { pattern: /^[A-Za-z0-9._/-]+$/, message: "Use a command name or absolute path." },
+      CONFIG_PATH: { pattern: /^[A-Za-z0-9._~:/+-]+$/, message: "Use an absolute path without shell metacharacters." },
+      UPLOAD_SCHEDULE: { pattern: /^[A-Za-z0-9*,: ._-]+$/, message: "Use a systemd OnCalendar value." },
+      NODE_HOME: { pattern: /^[A-Za-z0-9._~:/+-]+$/, message: "Use a path without shell metacharacters." },
+      DATA_SUBDIR: { validate: (value) => /^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/.test(value) && !value.split("/").includes(".."), message: "Use a relative subdir." },
+      SERVICE_NAME: { pattern: /^[A-Za-z0-9_.@-]+$/, message: "Use a systemd service name." },
+      SYSTEMCTL_COMMAND: { pattern: /^(sudo )?systemctl$/, message: "Use systemctl or sudo systemctl." },
+      STAGING_PATH: { pattern: /^[A-Za-z0-9._~:/+-]+$/, message: "Use a path without shell metacharacters." },
+    };
+
+    function readStored() {
+      try {
+        return JSON.parse(localStorage.getItem(valuesKey) || "{}");
+      } catch {
+        return {};
+      }
+    }
+
+    function collectValues() {
+      return Object.fromEntries(valueInputs.map((input) => [input.dataset.var, input.value.trim()]));
+    }
+
+    function validateVariable(name, value) {
+      const rule = variableRules[name];
+      if (!rule) return "";
+      if (!value) return "This value is required.";
+      if (/[\n\r"'`$\\;]/.test(value)) return "Remove shell metacharacters.";
+      if (rule.pattern && !rule.pattern.test(value)) return rule.message;
+      if (rule.validate && !rule.validate(value)) return rule.message;
+      return "";
+    }
+
+    function validateValues(values) {
+      const errors = {};
+      Object.entries(values).forEach(([name, value]) => {
+        const error = validateVariable(name, value);
+        if (error) errors[name] = error;
+      });
+      return errors;
+    }
+
+    function showValidation(errors) {
+      valueInputs.forEach((input) => {
+        const field = input.closest(".field");
+        const existing = field.querySelector(".validation-message");
+        if (existing) existing.remove();
+        const error = errors[input.dataset.var];
+        field.classList.toggle("invalid", Boolean(error));
+        if (error) {
+          const message = document.createElement("div");
+          message.className = "validation-message";
+          message.textContent = error;
+          field.appendChild(message);
+        }
+      });
+      const entries = Object.entries(errors);
+      validationIssues.classList.toggle("hidden", entries.length === 0);
+      validationIssues.innerHTML = entries.length
+        ? "Fix values before copying:<ul>" + entries.map(([name, error]) => "<li><code>" + name + "</code>: " + error + "</li>").join("") + "</ul>"
+        : "";
+    }
+
+    function invalidTemplateText(errors) {
+      return [
+        "# Fix invalid values before copying:",
+        ...Object.entries(errors).map(([name, error]) => "# - " + name + ": " + error),
+      ].join("\n");
+    }
+
+    function renderTemplates() {
+      const values = collectValues();
+      const errors = validateValues(values);
+      const hasErrors = Object.keys(errors).length > 0;
+      showValidation(errors);
+      templates.forEach((block) => {
+        if (!block.dataset.raw) block.dataset.raw = block.textContent;
+        const commandBlock = block.closest(".command-block");
+        const copy = commandBlock.querySelector(".copy");
+        commandBlock.classList.toggle("invalid", hasErrors);
+        copy.disabled = hasErrors;
+        block.textContent = hasErrors
+          ? invalidTemplateText(errors)
+          : block.dataset.raw.replace(/\{([A-Z0-9_]+)\}/g, (match, name) => Object.prototype.hasOwnProperty.call(values, name) ? values[name] : match);
+      });
+    }
+
+    async function copyBlock(button) {
+      if (button.disabled) return;
+      const block = button.closest(".command-block").querySelector("pre");
+      const text = block.textContent.trimEnd();
+      try {
+        await navigator.clipboard.writeText(text);
+        button.textContent = "Copied";
+        setTimeout(() => { button.textContent = "Copy"; }, 1100);
+      } catch {
+        const range = document.createRange();
+        range.selectNodeContents(block);
+        const selection = window.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+        button.textContent = "Selected";
+        setTimeout(() => { button.textContent = "Copy"; }, 1400);
+      }
+    }
+
+    function initValues() {
+      const stored = readStored();
+      valueInputs.forEach((input) => {
+        if (Object.prototype.hasOwnProperty.call(stored, input.dataset.var)) input.value = stored[input.dataset.var];
+        input.addEventListener("input", () => {
+          localStorage.setItem(valuesKey, JSON.stringify(collectValues()));
+          renderTemplates();
+        });
+      });
+      renderTemplates();
+    }
+
+    function initCopy() {
+      document.querySelectorAll(".copy").forEach((button) => button.addEventListener("click", () => copyBlock(button)));
+    }
+
+    function initScrollSpy() {
+      const sections = Array.from(document.querySelectorAll("header[id], section[id]"));
+      const observer = new IntersectionObserver((entries) => {
+        const visible = entries.filter((entry) => entry.isIntersecting).sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+        if (!visible) return;
+        navLinks.forEach((link) => link.classList.toggle("active", link.getAttribute("href") === "#" + visible.target.id));
+      }, { rootMargin: "-20% 0px -60% 0px", threshold: [0.1, 0.4, 0.7] });
+      sections.forEach((section) => observer.observe(section));
+    }
+
+    function initMobileJump() {
+      const select = document.getElementById("mobileJump");
+      select.addEventListener("change", () => document.querySelector(select.value).scrollIntoView({ behavior: "smooth", block: "start" }));
+    }
+
+    function initPrint() {
+      const button = document.getElementById("printPage");
+      let opened = [];
+      window.addEventListener("beforeprint", () => {
+        opened = Array.from(document.querySelectorAll("details:not([open])"));
+        opened.forEach((detail) => detail.setAttribute("open", ""));
+      });
+      window.addEventListener("afterprint", () => {
+        opened.forEach((detail) => detail.removeAttribute("open"));
+        opened = [];
+      });
+      button.addEventListener("click", () => window.print());
+    }
+
+    initValues();
+    initCopy();
+    initScrollSpy();
+    initMobileJump();
+    initPrint();
+  </script>
+</body>
+</html>

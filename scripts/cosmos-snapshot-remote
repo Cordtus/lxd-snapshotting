@@ -2,10 +2,13 @@
 import argparse
 import json
 import os
+import shutil
 import shlex
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
+from pathlib import PurePosixPath
 
 
 def parse_env_file(path):
@@ -81,9 +84,14 @@ def safe_chain_name(chain):
 def chain_paths(ingest_root, chain):
     root = Path(ingest_root).resolve()
     chain_root = (root / chain).resolve()
-    data_root = (chain_root / "data").resolve()
     if root not in chain_root.parents:
         raise SystemExit("resolved chain path escapes ingest root")
+    data_path = chain_root / "data"
+    if data_path.is_symlink():
+        raise SystemExit("chain data path must not be a symlink")
+    data_root = data_path.resolve()
+    if data_root == chain_root or chain_root not in data_root.parents:
+        raise SystemExit("resolved data path escapes chain ingest path")
     return chain_root, data_root
 
 
@@ -93,6 +101,48 @@ def rsync_args_with_host_destination(args, data_root):
     if not args:
         raise SystemExit("missing rsync server arguments")
     return [*args[:-1], str(data_root)]
+
+
+def remove_tree(path):
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def validate_tar_member(member):
+    path = PurePosixPath(member.name)
+    if path.is_absolute() or ".." in path.parts:
+        raise SystemExit(f"bootstrap archive member escapes data root: {member.name}")
+    if not (member.isdir() or member.isfile()):
+        raise SystemExit(f"bootstrap archive member type is not allowed: {member.name}")
+
+
+def extract_bootstrap_archive(stream, chain_root, data_root):
+    tmp_root = chain_root / ".bootstrap-data.tmp"
+    backup_root = chain_root / ".bootstrap-data.previous"
+    remove_tree(tmp_root)
+    remove_tree(backup_root)
+    tmp_root.mkdir(parents=True)
+
+    try:
+        with tarfile.open(fileobj=stream, mode="r|*") as archive:
+            for member in archive:
+                validate_tar_member(member)
+                archive.extract(member, tmp_root)
+    except BaseException:
+        remove_tree(tmp_root)
+        raise
+
+    if data_root.exists():
+        data_root.rename(backup_root)
+    try:
+        tmp_root.rename(data_root)
+    except Exception:
+        if backup_root.exists() and not data_root.exists():
+            backup_root.rename(data_root)
+        raise
+    remove_tree(backup_root)
 
 
 def parse_command_line(argv):
@@ -122,7 +172,7 @@ def split_wrapper_args(argv, original_argv):
 
 def parse_operation(argv, allow_client_id_arg):
     parser = argparse.ArgumentParser(description="Restricted remote command for Cosmos snapshot uploads.")
-    parser.add_argument("operation", choices=["prepare", "rsync", "finalize", "status"])
+    parser.add_argument("operation", choices=["prepare", "rsync", "bootstrap", "finalize", "status"])
     parser.add_argument("--chain", required=True)
     parser.add_argument("--client-id", default="")
     args, remainder = parser.parse_known_args(argv)
@@ -159,9 +209,19 @@ def main(argv=None):
         return 0
 
     if args.operation == "rsync":
+        if not marker.exists():
+            raise SystemExit(f"missing transfer marker: {marker}")
         data_root.mkdir(parents=True, exist_ok=True)
         command = [*rsync_command, *rsync_args_with_host_destination(remainder, data_root)]
         subprocess.run(command, check=True, env=safe_subprocess_env())
+        return 0
+
+    if args.operation == "bootstrap":
+        if not marker.exists():
+            raise SystemExit(f"missing transfer marker: {marker}")
+        chain_root.mkdir(parents=True, exist_ok=True)
+        extract_bootstrap_archive(sys.stdin.buffer, chain_root, data_root)
+        print(f"bootstrapped {chain} for client {client_id}")
         return 0
 
     if args.operation == "finalize":
@@ -169,7 +229,11 @@ def main(argv=None):
             raise SystemExit(f"missing transfer marker: {marker}")
         marker.unlink()
         command = [*shlex.split(finalizer_command), "--chain", chain]
-        subprocess.run(command, check=True, env=safe_subprocess_env())
+        try:
+            subprocess.run(command, check=True, env=safe_subprocess_env())
+        except BaseException:
+            marker.touch()
+            raise
         return 0
 
     if args.operation == "status":

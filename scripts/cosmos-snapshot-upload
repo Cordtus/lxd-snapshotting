@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 import argparse
+import html
+import http.server
 import os
+import re
 import shlex
 import shutil
 import subprocess
 import sys
+import urllib.parse
 from pathlib import Path
 
 
@@ -14,6 +18,83 @@ ALLOWED_STAGE_DB_DIRS = {
     "state.db",
     "evidence.db",
     "tx_index.db",
+}
+
+SOURCE_CONFIG_ORDER = [
+    "CHAIN",
+    "NODE_HOME",
+    "DATA_SUBDIR",
+    "SERVICE_NAME",
+    "SYSTEMCTL_COMMAND",
+    "STAGING_PATH",
+    "REQUIRED_DB_DIRS",
+    "STAGE_DB_DIRS",
+    "DB_MARKER_PATTERNS",
+    "LOCAL_RSYNC_EXTRA_ARGS",
+    "BUILDER_SSH",
+    "BUILDER_SSH_PORT",
+    "SSH_OPTIONS",
+    "REMOTE_COMMAND",
+    "CLIENT_ID",
+    "RSYNC_DELETE",
+    "RSYNC_EXTRA_ARGS",
+    "VERIFY_REMOTE_RSYNC",
+    "RSYNC_CHECKSUM",
+    "BOOTSTRAP_UPLOAD",
+    "RUN_FINALIZER",
+    "DRY_RUN",
+    "UPLOAD_SCHEDULE",
+]
+
+DEFAULT_SOURCE_CONFIG = {
+    "CHAIN": "examplechain",
+    "NODE_HOME": "~/.genesisd",
+    "DATA_SUBDIR": "data",
+    "SERVICE_NAME": "examplechain.service",
+    "SYSTEMCTL_COMMAND": "systemctl",
+    "STAGING_PATH": "/var/tmp/examplechain-stage",
+    "REQUIRED_DB_DIRS": "application.db blockstore.db state.db",
+    "STAGE_DB_DIRS": "application.db blockstore.db state.db evidence.db tx_index.db",
+    "DB_MARKER_PATTERNS": "CURRENT MANIFEST-* *.sst *.ldb",
+    "LOCAL_RSYNC_EXTRA_ARGS": "--numeric-ids",
+    "BUILDER_SSH": "snapupload@snapshot-builder.vpn",
+    "BUILDER_SSH_PORT": "2222",
+    "SSH_OPTIONS": "-o BatchMode=yes",
+    "REMOTE_COMMAND": "cosmos-snapshot-remote",
+    "CLIENT_ID": "",
+    "RSYNC_DELETE": "1",
+    "RSYNC_EXTRA_ARGS": "--numeric-ids",
+    "VERIFY_REMOTE_RSYNC": "1",
+    "RSYNC_CHECKSUM": "0",
+    "BOOTSTRAP_UPLOAD": "0",
+    "RUN_FINALIZER": "1",
+    "DRY_RUN": "0",
+    "UPLOAD_SCHEDULE": "Mon,Thu *-*-* 03:15:00",
+}
+
+CLIENT_EDITABLE_CONFIG = {
+    "NODE_HOME": ("Node home", "Daemon home, such as ~/.genesisd."),
+    "DATA_SUBDIR": ("Data subdir", "Usually data; must stay under node home."),
+    "SERVICE_NAME": ("Node service", "Local service stopped while staging."),
+    "SYSTEMCTL_COMMAND": ("Systemctl command", "Use systemctl, or sudo systemctl if needed."),
+    "STAGING_PATH": ("Staging path", "Local or mounted path for the persistent rsync copy."),
+    "UPLOAD_SCHEDULE": ("Timer schedule", "systemd OnCalendar value for the optional timer."),
+}
+
+CLIENT_READONLY_CONFIG = {
+    "CHAIN": "Server-accepted chain/archive prefix.",
+    "BUILDER_SSH": "VPN forced-command upload account.",
+    "BUILDER_SSH_PORT": "VPN/LAN SSH port.",
+    "REMOTE_COMMAND": "Server-enforced remote command.",
+}
+
+CLIENT_UI_RULES = {
+    "NODE_HOME": (re.compile(r"^[A-Za-z0-9._~:/+-]+$"), "Use a node-home path without spaces, quotes, or shell metacharacters."),
+    "DATA_SUBDIR": (re.compile(r"^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$"), "Use a relative subdirectory under the node home."),
+    "SERVICE_NAME": (re.compile(r"^[A-Za-z0-9_.@-]+$"), "Use a systemd service name."),
+    "SYSTEMCTL_COMMAND": (re.compile(r"^(sudo )?systemctl$"), "Use systemctl or sudo systemctl."),
+    "STAGING_PATH": (re.compile(r"^[A-Za-z0-9._~:/+-]+$"), "Use a staging path without spaces, quotes, or shell metacharacters."),
+    "UPLOAD_SCHEDULE": (re.compile(r"^[A-Za-z0-9*,: ._-]+$"), "Use a systemd OnCalendar value without quotes or shell metacharacters."),
 }
 
 
@@ -37,6 +118,195 @@ def parse_env_file(path):
     return values
 
 
+def complete_source_config(config):
+    values = DEFAULT_SOURCE_CONFIG.copy()
+    values.update(config)
+    return values
+
+
+def quote_env_value(value):
+    return shlex.quote(str(value))
+
+
+def render_source_config(values):
+    merged = complete_source_config(values)
+    lines = [
+        "# Source-side upload config.",
+        "# Edited by cosmos-snapshot-upload --serve-ui or manually.",
+        "",
+    ]
+    for key in SOURCE_CONFIG_ORDER:
+        lines.append(f"{key}={quote_env_value(merged.get(key, ''))}")
+        if key in {"CHAIN", "STAGING_PATH", "CLIENT_ID", "DRY_RUN"}:
+            lines.append("")
+    extras = sorted(key for key in merged if key not in SOURCE_CONFIG_ORDER)
+    if extras:
+        lines += ["# Extra local values.", *[f"{key}={quote_env_value(merged[key])}" for key in extras], ""]
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def write_source_config(path, values):
+    config_path = Path(path)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(render_source_config(values))
+    config_path.chmod(0o600)
+
+
+def validate_client_ui_values(values):
+    errors = {}
+    for key, (pattern, message) in CLIENT_UI_RULES.items():
+        value = values.get(key, "").strip()
+        if not value:
+            errors[key] = "This value is required."
+        elif any(char in value for char in ["\n", "\r", '"', "'", "`", "$", "\\", ";"]):
+            errors[key] = "Remove quotes, newlines, backslashes, semicolons, and shell substitutions."
+        elif key == "DATA_SUBDIR" and (".." in Path(value).parts or Path(value).is_absolute()):
+            errors[key] = "Use a relative subdirectory under the node home."
+        elif not pattern.match(value):
+            errors[key] = message
+    return errors
+
+
+def render_config_ui_page(config_path, values, errors=None, message=""):
+    errors = errors or {}
+    escaped_path = html.escape(str(config_path))
+    fields = []
+    for key, (label, help_text) in CLIENT_EDITABLE_CONFIG.items():
+        value = html.escape(values.get(key, ""))
+        error = errors.get(key, "")
+        error_html = f'<div class="error">{html.escape(error)}</div>' if error else ""
+        invalid = " invalid" if error else ""
+        fields.append(
+            f'<label class="field{invalid}"><span>{html.escape(label)}</span>'
+            f'<input name="{html.escape(key)}" value="{value}">'
+            f'<small>{html.escape(help_text)}</small>{error_html}</label>'
+        )
+
+    readonly = []
+    for key, help_text in CLIENT_READONLY_CONFIG.items():
+        value = html.escape(values.get(key, ""))
+        readonly.append(
+            f'<label class="field readonly"><span>{html.escape(key)}</span>'
+            f'<input value="{value}" readonly>'
+            f'<small>{html.escape(help_text)}</small></label>'
+        )
+
+    message_html = f'<div class="notice ok">{html.escape(message)}</div>' if message else ""
+    error_summary = ""
+    if errors:
+        error_summary = '<div class="notice error">Fix the highlighted values before saving.</div>'
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Snapshot Upload Client Config</title>
+  <style>
+    :root {{ color-scheme: light; --bg: #f7f8f5; --ink: #1e2420; --muted: #5f675f; --line: #d6ddd3; --panel: #fff; --accent: #16734f; --danger: #a23c3c; }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
+    main {{ max-width: 980px; margin: 0 auto; padding: 32px 18px 56px; }}
+    h1 {{ margin: 0; font-size: clamp(32px, 5vw, 52px); line-height: 1; letter-spacing: 0; }}
+    h2 {{ margin: 26px 0 10px; font-size: 22px; }}
+    p {{ color: var(--muted); }}
+    .panel {{ border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 16px; }}
+    .grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }}
+    .field {{ display: grid; gap: 5px; min-width: 0; }}
+    .field span {{ color: var(--muted); font-size: 12px; font-weight: 800; text-transform: uppercase; }}
+    input {{ width: 100%; min-height: 42px; border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; font: inherit; }}
+    .readonly input {{ background: #f1f4ef; color: var(--muted); }}
+    small {{ color: var(--muted); }}
+    .invalid input {{ border-color: var(--danger); background: #fff5f3; }}
+    .error {{ color: var(--danger); font-size: 12px; font-weight: 700; }}
+    .notice {{ margin: 14px 0; border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 8px; background: #f1fbf5; padding: 12px 13px; }}
+    .notice.error {{ border-left-color: var(--danger); background: #fff5f3; color: #6d2f2f; }}
+    button {{ min-height: 42px; border: 1px solid var(--accent); border-radius: 8px; background: var(--accent); color: white; padding: 10px 14px; font-weight: 800; cursor: pointer; }}
+    code {{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }}
+    @media (max-width: 720px) {{ .grid {{ grid-template-columns: 1fr; }} }}
+  </style>
+</head>
+<body>
+  <main>
+    <p><strong>Local-only client UI</strong></p>
+    <h1>Snapshot upload settings</h1>
+    <p>Edit source-node values only. Server values are read-only. Config: <code>{escaped_path}</code>.</p>
+    <div class="notice">Use a mounted share for staging if local disk cannot hold a second DB copy. Rsync keeps it incremental.</div>
+    {message_html}
+    {error_summary}
+    <form method="post">
+      <h2>Source-node values</h2>
+      <div class="panel grid">
+        {''.join(fields)}
+      </div>
+      <h2>Server-managed values</h2>
+      <div class="panel grid">
+        {''.join(readonly)}
+      </div>
+      <p><button type="submit">Save client settings</button></p>
+    </form>
+  </main>
+</body>
+</html>
+"""
+
+
+def make_config_ui_handler(config_path):
+    class ConfigUIHandler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, format, *args):
+            return
+
+        def send_html(self, status, html_text):
+            payload = html_text.encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def current_values(self):
+            return complete_source_config(parse_env_file(config_path))
+
+        def do_GET(self):
+            if self.path == "/favicon.ico":
+                self.send_response(204)
+                self.end_headers()
+                return
+            if self.path not in {"/", "/config"}:
+                self.send_error(404)
+                return
+            self.send_html(200, render_config_ui_page(config_path, self.current_values()))
+
+        def do_POST(self):
+            if self.path not in {"/", "/config"}:
+                self.send_error(404)
+                return
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length).decode()
+            submitted = {key: values[-1].strip() for key, values in urllib.parse.parse_qs(body, keep_blank_values=True).items()}
+            values = self.current_values()
+            for key in CLIENT_EDITABLE_CONFIG:
+                values[key] = submitted.get(key, values.get(key, "")).strip()
+            errors = validate_client_ui_values(values)
+            if errors:
+                self.send_html(400, render_config_ui_page(config_path, values, errors=errors))
+                return
+            write_source_config(config_path, values)
+            self.send_html(200, render_config_ui_page(config_path, values, message="Saved client settings."))
+
+    return ConfigUIHandler
+
+
+def serve_config_ui(config_path, host, port):
+    server = http.server.ThreadingHTTPServer((host, int(port)), make_config_ui_handler(config_path))
+    actual_host, actual_port = server.server_address
+    print(f"serving client config UI at http://{actual_host}:{actual_port}/")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        return
+
+
 def config_value(config, name, default=""):
     return os.environ.get(name, config.get(name, default))
 
@@ -55,6 +325,21 @@ def split_words(value):
     return shlex.split(value) if value else []
 
 
+def verification_rsync_extra_args(extra_args):
+    output_flags = {"-v", "--verbose", "--progress", "--stats"}
+    cleaned = []
+    for arg in split_words(extra_args):
+        if arg in output_flags or arg.startswith("--info=") or arg.startswith("--out-format="):
+            continue
+        if arg.startswith("-") and not arg.startswith("--") and any(flag in arg[1:] for flag in {"v", "P"}):
+            quiet_short_flags = "".join(flag for flag in arg[1:] if flag not in {"v", "P"})
+            if quiet_short_flags:
+                cleaned.append("-" + quiet_short_flags)
+            continue
+        cleaned.append(arg)
+    return shlex.join(cleaned)
+
+
 def run(command, dry_run):
     print(shlex.join(command))
     if not dry_run:
@@ -69,6 +354,21 @@ def run_capture(command, dry_run):
     if result.stderr:
         print(result.stderr, file=sys.stderr, end="")
     return result.stdout
+
+
+def run_pipeline(producer, consumer, dry_run):
+    print(f"{shlex.join(producer)} | {shlex.join(consumer)}")
+    if dry_run:
+        return
+    with subprocess.Popen(producer, stdout=subprocess.PIPE) as first:
+        try:
+            subprocess.run(consumer, stdin=first.stdout, check=True)
+        finally:
+            if first.stdout:
+                first.stdout.close()
+        producer_returncode = first.wait()
+    if producer_returncode:
+        raise subprocess.CalledProcessError(producer_returncode, producer)
 
 
 def ssh_command(builder, port, ssh_options, remote_command):
@@ -107,7 +407,7 @@ def remote_rsync_target(chain):
     return f"snapshot-upload-{chain}"
 
 
-def remote_rsync_command(source_path, builder, port, ssh_options, delete, extra_args, remote_base_command, chain, client_id="", checksum=False):
+def remote_rsync_command(source_path, builder, port, ssh_options, delete, extra_args, remote_base_command, chain, client_id="", checksum=False, progress=True):
     ssh_parts = ["ssh"]
     if port:
         ssh_parts += ["-p", str(port)]
@@ -119,9 +419,10 @@ def remote_rsync_command(source_path, builder, port, ssh_options, delete, extra_
         "rsync",
         "-a",
         "--partial",
-        "--info=progress2",
         f"--rsync-path={rsync_path}",
     ]
+    if progress:
+        command.append("--info=progress2")
     if checksum:
         command.append("--checksum")
     if delete:
@@ -139,16 +440,37 @@ def remote_verify_command(source_path, builder, port, ssh_options, delete, extra
         port,
         ssh_options,
         delete,
-        extra_args,
+        verification_rsync_extra_args(extra_args),
         remote_base_command,
         chain,
         client_id,
         checksum=True,
+        progress=False,
     )
     return [*command[:4], "--dry-run", "--itemize-changes", *command[4:]]
 
 
+def bootstrap_tar_command(staging_path):
+    return ["tar", "-C", staging_path.rstrip("/"), "-cf", "-", "."]
+
+
+def resolve_data_path(node_home, data_subdir):
+    data_subdir_path = Path(data_subdir)
+    if not data_subdir or data_subdir_path.is_absolute() or data_subdir in {".", ".."} or ".." in data_subdir_path.parts:
+        raise SystemExit("DATA_SUBDIR must be a relative path under NODE_HOME")
+
+    node_home_path = Path(node_home).expanduser()
+    data_path = node_home_path / data_subdir_path
+    node_home_resolved = node_home_path.resolve()
+    data_resolved = data_path.resolve()
+    if data_resolved == node_home_resolved or node_home_resolved not in data_resolved.parents:
+        raise SystemExit("DATA_SUBDIR must resolve under NODE_HOME")
+    return node_home_path, data_path
+
+
 def validate_db_dir(db_dir, marker_patterns):
+    if db_dir.is_symlink():
+        raise SystemExit(f"source DB directory must not be a symlink: {db_dir}")
     if not db_dir.is_dir():
         raise SystemExit(f"missing required Tendermint DB directory: {db_dir}")
     for pattern in marker_patterns:
@@ -166,7 +488,9 @@ def validate_tendermint_data(data_path, required_db_dirs, marker_patterns):
     for db_dir in required_db_dirs:
         if "/" in db_dir or db_dir in {".", ".."}:
             raise SystemExit("required DB directory must be a top-level data directory")
-        validate_db_dir(data_path / db_dir, marker_patterns)
+        source_db = data_path / db_dir
+        validate_db_dir(source_db, marker_patterns)
+        ensure_child_path(data_path, source_db, "source DB directory")
 
 
 def validate_stage_db_dirs(stage_db_dirs):
@@ -184,11 +508,40 @@ def ensure_separate_staging(data_path, staging_path):
     data_resolved = data_path.resolve()
     staging_resolved = staging_path.resolve()
     if data_resolved == staging_resolved:
-        raise SystemExit("STAGING_PATH must be separate from DATA_PATH")
+        raise SystemExit("STAGING_PATH must be separate from source data path")
     if data_resolved in staging_resolved.parents:
-        raise SystemExit("STAGING_PATH must not be inside DATA_PATH")
+        raise SystemExit("STAGING_PATH must not be inside source data path")
     if staging_resolved in data_resolved.parents:
-        raise SystemExit("DATA_PATH must not be inside STAGING_PATH")
+        raise SystemExit("source data path must not be inside STAGING_PATH")
+
+
+def ensure_child_path(root, child, label):
+    root_resolved = root.resolve()
+    child_resolved = child.resolve()
+    if root_resolved not in child_resolved.parents:
+        raise SystemExit(f"{label} must resolve under source data path: {child}")
+
+
+def validate_optional_source_db(data_path, source_db):
+    if source_db.is_symlink():
+        raise SystemExit(f"source DB directory must not be a symlink: {source_db}")
+    if not source_db.exists():
+        return
+    if not source_db.is_dir():
+        raise SystemExit(f"staged source path is not a directory: {source_db}")
+    ensure_child_path(data_path, source_db, "source DB directory")
+
+
+def validate_staging_path(staging_path):
+    if staging_path.is_symlink():
+        raise SystemExit(f"STAGING_PATH must not be a symlink: {staging_path}")
+
+
+def validate_staging_db_path(staged_db):
+    if staged_db.is_symlink():
+        raise SystemExit(f"staging DB directory must not be a symlink: {staged_db}")
+    if staged_db.exists() and not staged_db.is_dir():
+        raise SystemExit(f"staging DB path is not a directory: {staged_db}")
 
 
 def remove_path(path, dry_run):
@@ -220,9 +573,15 @@ def stage_database(data_path, staging_path, stage_db_dirs, required_db_dirs, mar
     if dry_run:
         print(f"would create staging directory {staging_path}")
     else:
+        validate_staging_path(staging_path)
         staging_path.mkdir(parents=True, exist_ok=True)
 
     prune_staging_root(staging_path, stage_db_dirs, dry_run)
+
+    if not dry_run:
+        for db_dir in stage_db_dirs:
+            validate_optional_source_db(data_path, data_path / db_dir)
+            validate_staging_db_path(staging_path / db_dir)
 
     for db_dir in stage_db_dirs:
         source_db = data_path / db_dir
@@ -234,19 +593,28 @@ def stage_database(data_path, staging_path, stage_db_dirs, required_db_dirs, mar
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Stop a Cosmos/Tendermint service, stage public DB files, rsync to a snapshot builder, and trigger finalization.")
+    parser = argparse.ArgumentParser(description="Stop a Cosmos/Tendermint service, stage public DB files, upload to a snapshot builder, and trigger finalization.")
     parser.add_argument("--config", default=os.environ.get("COSMOS_SNAPSHOT_UPLOAD_CONFIG", "./source-upload.env"))
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--no-finalize", action="store_true")
+    parser.add_argument("--bootstrap", action="store_true", help="stream a tar archive of the staged DB copy to seed builder ingest before normal incremental rsync runs")
+    parser.add_argument("--serve-ui", action="store_true", help="serve a local web UI for editing exposed source-side config values")
+    parser.add_argument("--ui-host", default="127.0.0.1", help="host/IP for --serve-ui; defaults to loopback")
+    parser.add_argument("--ui-port", default="8766", help="TCP port for --serve-ui")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    if args.serve_ui:
+        serve_config_ui(args.config, args.ui_host, args.ui_port)
+        return 0
+
     config = parse_env_file(args.config)
 
     chain = safe_chain_name(config_value(config, "CHAIN"))
-    data_path = config_value(config, "DATA_PATH")
+    node_home = config_value(config, "NODE_HOME")
+    data_subdir = config_value(config, "DATA_SUBDIR", "data")
     staging_path = config_value(config, "STAGING_PATH")
     service_name = config_value(config, "SERVICE_NAME")
     systemctl = config_value(config, "SYSTEMCTL_COMMAND", "systemctl")
@@ -264,11 +632,12 @@ def main():
     rsync_checksum = bool_value(config_value(config, "RSYNC_CHECKSUM", "0"))
     verify_remote_rsync = bool_value(config_value(config, "VERIFY_REMOTE_RSYNC", "1"))
     run_finalizer = bool_value(config_value(config, "RUN_FINALIZER", "1")) and not args.no_finalize
+    bootstrap_upload = args.bootstrap or bool_value(config_value(config, "BOOTSTRAP_UPLOAD", "0"))
     dry_run = args.dry_run or bool_value(config_value(config, "DRY_RUN", "0"))
 
     missing = [name for name, value in {
         "CHAIN": chain,
-        "DATA_PATH": data_path,
+        "NODE_HOME": node_home,
         "STAGING_PATH": staging_path,
         "SERVICE_NAME": service_name,
         "BUILDER_SSH": builder,
@@ -276,14 +645,17 @@ def main():
     if missing:
         raise SystemExit(f"missing required config: {', '.join(missing)}")
 
-    data_path = Path(data_path)
-    staging_path = Path(staging_path)
+    node_home, data_path = resolve_data_path(node_home, data_subdir)
+    staging_path = Path(staging_path).expanduser()
     if not dry_run:
+        if not node_home.is_dir():
+            raise SystemExit(f"NODE_HOME does not exist or is not a directory: {node_home}")
         if not data_path.is_dir():
-            raise SystemExit(f"DATA_PATH does not exist or is not a directory: {data_path}")
+            raise SystemExit(f"DATA_SUBDIR does not exist or is not a directory under NODE_HOME: {data_path}")
         ensure_separate_staging(data_path, staging_path)
 
     prepare_command = shlex.join(remote_command(remote_base_command, "prepare", chain, client_id))
+    bootstrap_command = shlex.join(remote_command(remote_base_command, "bootstrap", chain, client_id))
     finalize_command = shlex.join(remote_command(remote_base_command, "finalize", chain, client_id))
 
     service_stopped = False
@@ -297,21 +669,28 @@ def main():
 
     run(ssh_command(builder, builder_port, ssh_options, prepare_command), dry_run)
     try:
-        run(
-            remote_rsync_command(
-                staging_path.as_posix(),
-                builder,
-                builder_port,
-                ssh_options,
-                rsync_delete,
-                rsync_extra_args,
-                remote_base_command,
-                chain,
-                client_id,
-                checksum=rsync_checksum,
-            ),
-            dry_run,
-        )
+        if bootstrap_upload:
+            run_pipeline(
+                bootstrap_tar_command(staging_path.as_posix()),
+                ssh_command(builder, builder_port, ssh_options, bootstrap_command),
+                dry_run,
+            )
+        else:
+            run(
+                remote_rsync_command(
+                    staging_path.as_posix(),
+                    builder,
+                    builder_port,
+                    ssh_options,
+                    rsync_delete,
+                    rsync_extra_args,
+                    remote_base_command,
+                    chain,
+                    client_id,
+                    checksum=rsync_checksum,
+                ),
+                dry_run,
+            )
         if verify_remote_rsync:
             verify_output = run_capture(
                 remote_verify_command(

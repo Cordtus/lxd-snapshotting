@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LXD Snapshotter Runbooks</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f7f8f5;
+      --ink: #1e2420;
+      --muted: #5f675f;
+      --line: #d6ddd3;
+      --soft: #eef4f1;
+      --accent: #16734f;
+      --accent-dark: #0f563a;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font: 15px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+    a { color: inherit; }
+    main { min-height: 100vh; display: grid; align-content: center; padding: clamp(24px, 6vw, 72px); }
+    .wrap { max-width: 980px; width: 100%; }
+    .kicker { margin: 0 0 10px; color: var(--accent-dark); font-size: 12px; font-weight: 900; text-transform: uppercase; }
+    h1 { max-width: 780px; margin: 0; font-size: clamp(42px, 8vw, 72px); line-height: 0.95; letter-spacing: 0; }
+    .lead { max-width: 680px; margin: 18px 0 36px; color: var(--muted); font-size: 18px; }
+    .runbooks { border-top: 1px solid var(--line); }
+    .runbook {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 18px;
+      align-items: center;
+      border-bottom: 1px solid var(--line);
+      padding: 22px 0;
+      text-decoration: none;
+    }
+    .runbook:hover strong { color: var(--accent); }
+    .runbook span { display: block; color: var(--accent-dark); font-size: 12px; font-weight: 900; text-transform: uppercase; }
+    .runbook strong { display: block; margin-top: 4px; font-size: 28px; line-height: 1.1; }
+    .runbook p { max-width: 640px; margin: 8px 0 0; color: var(--muted); }
+    .arrow {
+      display: grid;
+      place-items: center;
+      width: 42px;
+      height: 42px;
+      border: 1px solid var(--line);
+      border-radius: 50%;
+      background: #fff;
+      color: var(--accent);
+      font-weight: 900;
+    }
+    .note {
+      margin-top: 24px;
+      border-left: 4px solid var(--accent);
+      background: var(--soft);
+      padding: 12px 14px;
+      color: var(--muted);
+    }
+    @media (max-width: 640px) {
+      main { align-content: start; }
+      .runbook { grid-template-columns: 1fr; }
+      .arrow { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="wrap">
+      <p class="kicker">Runbook index</p>
+      <h1>LXD Snapshotter</h1>
+      <p class="lead">Open the server or client runbook. Each page has a print action for a clean runbook copy.</p>
+
+      <div class="runbooks" aria-label="Snapshotter runbooks">
+        <a class="runbook" href="guides/lxd-snapshotter-operator-setup.html">
+          <div>
+            <span>Server/operator</span>
+            <strong>Build the receiver</strong>
+            <p>LXD storage, builder container, forced SSH, FTP read-only output, validation, and operations.</p>
+          </div>
+          <div class="arrow" aria-hidden="true">-&gt;</div>
+        </a>
+
+        <a class="runbook" href="guides/lxd-snapshotter-client-setup.html">
+          <div>
+            <span>Client/source node</span>
+            <strong>Upload source snapshots</strong>
+            <p>Prefilled config, local staging path, bootstrap seed, normal rsync upload, and optional timer.</p>
+          </div>
+          <div class="arrow" aria-hidden="true">-&gt;</div>
+        </a>
+      </div>
+
+      <div class="note">Use this page as the local entry point: <code>http://127.0.0.1:8765/</code></div>
+    </div>
+  </main>
+</body>
+</html>
