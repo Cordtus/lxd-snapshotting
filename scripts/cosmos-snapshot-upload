@@ -59,7 +59,7 @@ DEFAULT_SOURCE_CONFIG = {
     "LOCAL_RSYNC_EXTRA_ARGS": "--numeric-ids",
     "BUILDER_SSH": "snapupload@snapshot-builder.vpn",
     "BUILDER_SSH_PORT": "2222",
-    "SSH_OPTIONS": "-o BatchMode=yes",
+    "SSH_OPTIONS": "-i /etc/cosmos-snapshot/upload_key -o IdentitiesOnly=yes -o BatchMode=yes",
     "REMOTE_COMMAND": "cosmos-snapshot-remote",
     "CLIENT_ID": "",
     "RSYNC_DELETE": "1",

@@ -30,6 +30,7 @@ The client never configures server storage paths.
 
 - `scripts/cosmos-snapshot-upload`: source-node stage/upload command.
 - `config/source-upload.env.example`: source-node config template.
+- `CLIENT_SETUP.md`: concise source-node setup guide for clients.
 - `index.html`: local guide index.
 - `guides/lxd-snapshotter-operator-setup.html`: server/operator runbook.
 - `guides/lxd-snapshotter-client-setup.html`: client runbook.
@@ -37,87 +38,37 @@ The client never configures server storage paths.
 
 ## Client Side
 
-Open `index.html` locally. It links the server/operator and client/source
-runbooks. Each runbook has a print action.
+Use `CLIENT_SETUP.md` for the concise GitHub setup flow, or
+`guides/lxd-snapshotter-client-setup.html` for the interactive handoff runbook.
+The source operator needs only:
 
-Transport uses the router VPN. The builder is VPN/LAN-only.
+- router VPN access and the WireGuard config file
+- the upload SSH key
+- `scripts/cosmos-snapshot-upload`
+- a filled `/etc/cosmos-snapshot/source-upload.env`
 
-Client config covers:
+The client config sets `CHAIN`, `NODE_HOME`, `DATA_SUBDIR`, `SERVICE_NAME`,
+`STAGING_PATH`, and upload SSH options. It never sets builder storage paths.
 
-- `CHAIN`
-- `NODE_HOME`
-- `DATA_SUBDIR` (usually `data`)
-- `SERVICE_NAME`
-- `STAGING_PATH` on local disk or a mounted share
-- upload SSH target/options
-- optional rsync tuning
-
-Install the prefilled config at `/etc/cosmos-snapshot/source-upload.env`. Verify
-with one dry run and one bootstrap seed. Then run manually or by optional timer.
-
-Local settings UI:
-
-```bash
-cosmos-snapshot-upload --config /etc/cosmos-snapshot/source-upload.env --serve-ui --ui-host 127.0.0.1 --ui-port 8766
-```
-
-Real upload:
-
-```text
-systemctl stop <service>
-validate <node home>/<data subdir>
-rsync selected DB dirs to <staging path>
-systemctl start <service>
-rsync <staging path> to the server
-checksum dry-run verify
-request finalization
-```
-
-Set `NODE_HOME` to the dir containing `config/`, `data/`, and keyrings, for
-example `~/.genesisd`. The uploader reads only `NODE_HOME/DATA_SUBDIR`.
-
-`STAGING_PATH` is a persistent rsync copy. Use a mounted share if local disk
-cannot hold a second DB copy.
-
-First large seed:
-
-```bash
-cosmos-snapshot-upload --config /etc/cosmos-snapshot/source-upload.env --bootstrap
-```
-
-Bootstrap still runs stop/stage/restart, then streams a tar archive from
-`STAGING_PATH`. Later runs use normal rsync.
-
-Optional timer:
-
-```ini
-[Timer]
-OnCalendar=Mon,Thu *-*-* 03:15:00
-RandomizedDelaySec=2h
-Persistent=true
-Unit=cosmos-snapshot-upload.service
-```
-
-Handshake: `prepare`, transfer, checksum dry-run verify, `finalize`. Server
-validates before writing archive, checksum, manifest, and `latest.*`.
-
-Default staged directories:
-
-- `application.db`
-- `blockstore.db`
-- `state.db`
-- `evidence.db`
-- `tx_index.db`
-
-The uploader excludes validator state, state-sync snapshots, WALs, keys,
-keyrings, and arbitrary top-level paths.
-
-Useful checks:
+First run:
 
 ```bash
 cosmos-snapshot-upload --config /etc/cosmos-snapshot/source-upload.env --dry-run
-systemctl list-timers cosmos-snapshot-upload.timer
+cosmos-snapshot-upload --config /etc/cosmos-snapshot/source-upload.env --bootstrap
 ```
+
+Routine refresh:
+
+```bash
+cosmos-snapshot-upload --config /etc/cosmos-snapshot/source-upload.env
+```
+
+The helper stops the node, validates `NODE_HOME/DATA_SUBDIR`, stages only public
+DB directories, restarts the node, rsyncs the staging copy, verifies remote
+drift, and asks the builder to publish. Default staged directories are
+`application.db`, `blockstore.db`, `state.db`, `evidence.db`, and `tx_index.db`.
+Validator state, keys, keyrings, WALs, state-sync snapshots, and arbitrary
+top-level paths are excluded.
 
 ## Snapshot Host Boundary
 
@@ -144,5 +95,5 @@ the consistent staging source.
 
 ```bash
 python3 -m unittest discover -s tests
-python3 -m py_compile scripts/cosmos-snapshot-upload
+python3 -m py_compile scripts/cosmos-snapshot-finalize scripts/cosmos-snapshot-upload scripts/cosmos-snapshot-remote
 ```

@@ -340,6 +340,7 @@
     <select id="mobileJump" aria-label="Jump to section">
       <option value="#overview">Overview</option>
       <option value="#values">Values</option>
+      <option value="#vpn">VPN and SSH</option>
       <option value="#install">Install and config</option>
       <option value="#preflight">Preflight</option>
       <option value="#upload">First run</option>
@@ -356,6 +357,7 @@
       <nav class="nav" id="nav">
         <a href="#overview">Overview</a>
         <a href="#values">Values</a>
+        <a href="#vpn">VPN and SSH</a>
         <a href="#install">Install and config</a>
         <a href="#preflight">Preflight</a>
         <a href="#upload">First run</a>
@@ -398,6 +400,8 @@
               <label class="field"><span>Upload account</span><input type="text" data-var="UPLOAD_USER" value="snapupload"></label>
               <label class="field"><span>Builder host</span><input type="text" data-var="BUILDER_HOST" value="snapshot-builder.vpn"></label>
               <label class="field"><span>SSH port</span><input type="number" data-var="SSH_PORT" value="2222"></label>
+              <label class="field"><span>VPN interface</span><input type="text" data-var="WG_INTERFACE" value="cosmos-snapshot"></label>
+              <label class="field"><span>SSH key path</span><input type="text" data-var="SSH_KEY_PATH" value="/etc/cosmos-snapshot/upload_key"></label>
               <label class="field"><span>Remote command</span><input type="text" data-var="REMOTE_COMMAND" value="cosmos-snapshot-remote"></label>
               <label class="field wide"><span>Config path</span><input type="text" data-var="CONFIG_PATH" value="/etc/cosmos-snapshot/source-upload.env"></label>
             </div>
@@ -418,17 +422,52 @@
             <div id="validationIssues" class="callout danger hidden" role="alert"></div>
           </div>
           <details>
-            <summary>SSH key</summary>
+            <summary>VPN and SSH handoff</summary>
             <div class="detail-body">
-              <p>The server installs the source public key with a forced command. For a custom key, use <code>~/.ssh/config</code> or add absolute <code>-i /path/to/key</code> to <code>SSH_OPTIONS</code>.</p>
+              <p>The operator provides a WireGuard config and an SSH private key. The server installs the matching public key with a forced command. Keep both files readable only by root.</p>
             </div>
           </details>
         </div>
       </section>
 
+      <section id="vpn">
+        <div class="section-head">
+          <h2>2. Install VPN and SSH access</h2>
+          <p>Run as root/sudo on the source node. Use the WireGuard config and upload key provided by the snapshot host operator.</p>
+        </div>
+
+        <div class="command-block">
+          <div class="command-head"><span>Install transport tools and VPN config</span><button class="copy" type="button">Copy</button></div>
+          <pre data-template># Run on the source node as root, or prefix with sudo.
+apt-get update
+apt-get install -y wireguard-tools openssh-client
+install -d -m 0700 /etc/wireguard
+install -m 0600 "./{WG_INTERFACE}.conf" "/etc/wireguard/{WG_INTERFACE}.conf"
+wg-quick up "{WG_INTERFACE}"
+wg show "{WG_INTERFACE}"
+systemctl enable "wg-quick@{WG_INTERFACE}"</pre>
+        </div>
+
+        <div class="command-block">
+          <div class="command-head"><span>Install upload SSH key</span><button class="copy" type="button">Copy</button></div>
+          <pre data-template>install -d -m 0750 "$(dirname "{SSH_KEY_PATH}")"
+install -m 0600 ./upload_key "{SSH_KEY_PATH}"</pre>
+        </div>
+
+        <div class="command-block">
+          <div class="command-head"><span>Test restricted SSH access</span><button class="copy" type="button">Copy</button></div>
+          <pre data-template>ssh -i "{SSH_KEY_PATH}" -o IdentitiesOnly=yes -o BatchMode=yes -p {SSH_PORT} "{UPLOAD_USER}@{BUILDER_HOST}" \
+  {REMOTE_COMMAND} status --chain "{CHAIN}"</pre>
+        </div>
+
+        <div class="callout">
+          The router VPN should allow this peer to reach only the upload SSH service.
+        </div>
+      </section>
+
       <section id="install">
         <div class="section-head">
-          <h2>2. Install helper and config</h2>
+          <h2>3. Install helper and config</h2>
           <p>Run as root/sudo on the source node. Manual runs and timer share this config.</p>
         </div>
 
@@ -436,7 +475,7 @@
           <div class="command-head"><span>Install tools and helper</span><button class="copy" type="button">Copy</button></div>
           <pre data-template># Run on the source node as root, or prefix with sudo.
 apt-get update
-apt-get install -y python3 rsync openssh-client tar
+apt-get install -y python3 rsync tar
 install -m 0755 scripts/cosmos-snapshot-upload /usr/local/bin/cosmos-snapshot-upload</pre>
         </div>
 
@@ -461,7 +500,7 @@ LOCAL_RSYNC_EXTRA_ARGS="--numeric-ids"
 
 BUILDER_SSH="{UPLOAD_USER}@{BUILDER_HOST}"
 BUILDER_SSH_PORT={SSH_PORT}
-SSH_OPTIONS="-o BatchMode=yes"
+SSH_OPTIONS="-i {SSH_KEY_PATH} -o IdentitiesOnly=yes -o BatchMode=yes"
 REMOTE_COMMAND="{REMOTE_COMMAND}"
 CLIENT_ID=""
 
@@ -499,7 +538,7 @@ chmod 0600 "{CONFIG_PATH}"</pre>
 
       <section id="preflight">
         <div class="section-head">
-          <h2>3. Preflight paths and VPN access</h2>
+          <h2>4. Preflight paths and VPN access</h2>
           <p>Run before first dry run. It catches bad paths and checks VPN SSH.</p>
         </div>
 
@@ -523,14 +562,14 @@ staging.parent.chmod(0o750)'</pre>
 
         <div class="command-block">
           <div class="command-head"><span>VPN SSH status</span><button class="copy" type="button">Copy</button></div>
-          <pre data-template>ssh -p {SSH_PORT} -o BatchMode=yes "{UPLOAD_USER}@{BUILDER_HOST}" \
+          <pre data-template>ssh -i "{SSH_KEY_PATH}" -o IdentitiesOnly=yes -o BatchMode=yes -p {SSH_PORT} "{UPLOAD_USER}@{BUILDER_HOST}" \
   {REMOTE_COMMAND} status --chain "{CHAIN}"</pre>
         </div>
       </section>
 
       <section id="upload">
         <div class="section-head">
-          <h2>4. Dry run, seed once, then run routine uploads</h2>
+          <h2>5. Dry run, seed once, then run routine uploads</h2>
           <p>Real upload stops the service, stages allowed DB dirs, restarts, transfers, verifies, then requests publish.</p>
         </div>
 
@@ -618,7 +657,7 @@ systemctl disable --now cosmos-snapshot-upload.timer</pre>
 
       <section id="failures">
         <div class="section-head">
-          <h2>5. Common failures</h2>
+          <h2>6. Common failures</h2>
           <p>Fix the path, VPN/SSH, or allowlist issue, then rerun. Do not publish partial ingest manually.</p>
         </div>
 
@@ -650,6 +689,8 @@ systemctl disable --now cosmos-snapshot-upload.timer</pre>
       UPLOAD_USER: { pattern: /^[A-Za-z_][A-Za-z0-9._-]*$/, message: "Use a Unix account name." },
       BUILDER_HOST: { pattern: /^[A-Za-z0-9._:-]+$/, message: "Use a hostname or address without spaces." },
       SSH_PORT: { validate: (value) => Number.isInteger(Number(value)) && Number(value) > 0 && Number(value) < 65536, message: "Use a TCP port from 1 to 65535." },
+      WG_INTERFACE: { validate: (value) => /^[A-Za-z0-9_.-]+$/.test(value) && value.length <= 15, message: "Use a Linux interface name up to 15 characters." },
+      SSH_KEY_PATH: { pattern: /^[A-Za-z0-9._~:/+-]+$/, message: "Use an absolute key path without shell metacharacters." },
       REMOTE_COMMAND: { pattern: /^[A-Za-z0-9._/-]+$/, message: "Use a command name or absolute path." },
       CONFIG_PATH: { pattern: /^[A-Za-z0-9._~:/+-]+$/, message: "Use an absolute path without shell metacharacters." },
       UPLOAD_SCHEDULE: { pattern: /^[A-Za-z0-9*,: ._-]+$/, message: "Use a systemd OnCalendar value." },
