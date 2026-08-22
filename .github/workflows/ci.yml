@@ -1,0 +1,11 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  build:
+    runs-on: [self-hosted, linux, x64, runner-class-cac]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax check
+        run: bash -n scripts/cosmos-snapshot-finalize scripts/cosmos-snapshot-remote scripts/cosmos-snapshot-upload
+      - name: Test
+        run: python3 -m unittest tests/test_snapshot_tools.py
